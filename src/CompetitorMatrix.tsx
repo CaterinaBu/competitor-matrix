@@ -71,19 +71,9 @@ function extractDriveId(u: string): string | null {
   return null;
 }
 function normalizeImageUrl(u: string): string {
-  try {
-    const url = new URL(u);
-    // Прямые ссылки на картинки — без изменений
-    if (/\.(png|jpe?g|webp|gif|svg)(\?.*)?$/i.test(url.pathname)) return u;
-    // Google Drive: /file/d/ID/view или ...open?id=ID → thumbnail
-    const m1 = url.pathname.match(/\/file\/d\/([^/]+)/);
-    const m2 = url.search.match(/(?:\?|&)id=([^&]+)/);
-    const id = (m1 && m1[1]) || (m2 && m2[1]);
-    if (id) return `https://drive.google.com/thumbnail?id=${id}&sz=w2000`;
-    return u;
-  } catch {
-    return u;
-  }
+  if (!u) return u;
+  const id = extractDriveId(u);
+  return id ? `https://drive.google.com/uc?export=view&id=${id}` : u;
 }
 
 function rowsToMatrix(rows: SheetRow[]): MatrixData {
@@ -190,6 +180,19 @@ function CourseHeaderCell({ cLabel, onHide }: { cLabel: string; onHide: () => vo
   );
 }
 
+// --- helper: нормализация ссылок на изображения (Drive и прямые URL)
+function normalizeImageUrl(u) {
+  try {
+    const url = new URL(u);
+    if (/\.(png|jpe?g|webp|gif|svg)(\?.*)?$/i.test(url.pathname)) return u;
+    const m1 = url.pathname.match(/\/file\/d\/([^/]+)/);
+    const m2 = url.search.match(/(?:\?|&)id=([^&]+)/);
+    const id = (m1 && m1[1]) || (m2 && m2[1]);
+    if (id) return `https://drive.google.com/thumbnail?id=${id}&sz=w2000`;
+    return u;
+  } catch { return u; }
+}
+
 export default function CompetitorMatrix() {
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [tabToSheet, setTabToSheet] = useState<Record<string, string>>({});
@@ -286,7 +289,7 @@ export default function CompetitorMatrix() {
 
     if (!APPS_SCRIPT_URL) return;
     try {
-      let res = await fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify(payload) });
+      let res = await fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       const raw = await res.text();
       let json: any = null; try { json = JSON.parse(raw); } catch { /* not JSON */ }
       const unauthorized = !!(json && typeof json.error === "string" && json.error.toUpperCase().includes("UNAUTHORIZED"));
@@ -294,7 +297,7 @@ export default function CompetitorMatrix() {
         const key = typeof window !== "undefined" ? window.prompt("Введите API_KEY для записи в таблицу", "") : null;
         if (key) {
           setApiKey(key);
-          await fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ ...payload, apiKey: key }) });
+          await fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...payload, apiKey: key }) });
         }
       }
     } catch (e) {
@@ -318,7 +321,7 @@ export default function CompetitorMatrix() {
     const newCourseId = `c${nextIndex}`;
     if (APPS_SCRIPT_URL) {
       try {
-        const res = await fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ op: "addCourse", tab: tabToSheet[activeTab], courseId: newCourseId }) });
+        const res = await fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "addCourse", apiKey: getApiKey(), tab: tabToSheet[activeTab], courseId: newCourseId }) });
         if (!res.ok) throw new Error("Не удалось добавить курс в таблицу");
       } catch (e) {
         console.warn("Apps Script недоступен, добавление только локально", e);
@@ -335,7 +338,7 @@ export default function CompetitorMatrix() {
     setNewCriterion({ name: "", description: "", filledBy: "" });
     setAddCriterionOpen(false);
     if (APPS_SCRIPT_URL) {
-      fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ op: "addCriterion", tab: tabToSheet[activeTab], criterion: newC }) }).catch(() => console.warn("Не удалось записать критерий в таблицу"));
+      fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "addCriterion", apiKey: getApiKey(), tab: tabToSheet[activeTab], criterion: newC }) }).catch(() => console.warn("Не удалось записать критерий в таблицу"));
     }
   }
 
