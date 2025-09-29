@@ -180,19 +180,6 @@ function CourseHeaderCell({ cLabel, onHide }: { cLabel: string; onHide: () => vo
   );
 }
 
-// --- helper: нормализация ссылок на изображения (Drive и прямые URL)
-function normalizeImageUrl(u) {
-  try {
-    const url = new URL(u);
-    if (/\.(png|jpe?g|webp|gif|svg)(\?.*)?$/i.test(url.pathname)) return u;
-    const m1 = url.pathname.match(/\/file\/d\/([^/]+)/);
-    const m2 = url.search.match(/(?:\?|&)id=([^&]+)/);
-    const id = (m1 && m1[1]) || (m2 && m2[1]);
-    if (id) return `https://drive.google.com/thumbnail?id=${id}&sz=w2000`;
-    return u;
-  } catch { return u; }
-}
-
 export default function CompetitorMatrix() {
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [tabToSheet, setTabToSheet] = useState<Record<string, string>>({});
