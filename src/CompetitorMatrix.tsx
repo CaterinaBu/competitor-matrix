@@ -70,11 +70,27 @@ function extractDriveId(u: string): string | null {
   } catch { /* no‑op */ }
   return null;
 }
+
+// --- helper: нормализация ссылок на изображения (Drive и прямые URL)
 function normalizeImageUrl(u: string): string {
-  if (!u) return u;
-  const id = extractDriveId(u);
-  return id ? `https://drive.google.com/uc?export=view&id=${id}` : u;
+  try {
+    const url = new URL(u);
+
+    // Прямые ссылки на картинки — пропускаем
+    if (/\.(png|jpe?g|webp|gif|svg)(\?.*)?$/i.test(url.pathname)) return u;
+
+    // Google Drive: /file/d/<id>/view  или ?id=<id>
+    const m1 = u.match(/\/file\/d\/([^/]+)/);
+    const m2 = u.match(/[?&]id=([^&]+)/);
+    const id = (m1 && m1[1]) || (m2 && m2[1]);
+    if (id) return `https://drive.google.com/thumbnail?id=${id}&sz=w2000`;
+
+    return u;
+  } catch {
+    return u;
+  }
 }
+
 
 function rowsToMatrix(rows: SheetRow[]): MatrixData {
   const allKeys = new Set<string>();
@@ -178,19 +194,6 @@ function CourseHeaderCell({ cLabel, onHide }: { cLabel: string; onHide: () => vo
       </Button>
     </div>
   );
-}
-
-// --- helper: нормализация ссылок на изображения (Drive и прямые URL)
-function normalizeImageUrl(u) {
-  try {
-    const url = new URL(u);
-    if (/\.(png|jpe?g|webp|gif|svg)(\?.*)?$/i.test(url.pathname)) return u;
-    const m1 = url.pathname.match(/\/file\/d\/([^/]+)/);
-    const m2 = url.search.match(/(?:\?|&)id=([^&]+)/);
-    const id = (m1 && m1[1]) || (m2 && m2[1]);
-    if (id) return `https://drive.google.com/thumbnail?id=${id}&sz=w2000`;
-    return u;
-  } catch { return u; }
 }
 
 export default function CompetitorMatrix() {
