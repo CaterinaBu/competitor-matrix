@@ -71,9 +71,19 @@ function extractDriveId(u: string): string | null {
   return null;
 }
 function normalizeImageUrl(u: string): string {
-  if (!u) return u;
-  const id = extractDriveId(u);
-  return id ? `https://drive.google.com/uc?export=view&id=${id}` : u;
+  try {
+    const url = new URL(u);
+    // Прямые ссылки на картинки — без изменений
+    if (/\.(png|jpe?g|webp|gif|svg)(\?.*)?$/i.test(url.pathname)) return u;
+    // Google Drive: /file/d/ID/view или ...open?id=ID → thumbnail
+    const m1 = url.pathname.match(/\/file\/d\/([^/]+)/);
+    const m2 = url.search.match(/(?:\?|&)id=([^&]+)/);
+    const id = (m1 && m1[1]) || (m2 && m2[1]);
+    if (id) return `https://drive.google.com/thumbnail?id=${id}&sz=w2000`;
+    return u;
+  } catch {
+    return u;
+  }
 }
 
 function rowsToMatrix(rows: SheetRow[]): MatrixData {
