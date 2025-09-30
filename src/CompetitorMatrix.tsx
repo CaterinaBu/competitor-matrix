@@ -402,17 +402,71 @@ $1
     setData((prev) => ({ ...prev, courses: [...prev.courses, { id: newCourseId, name: `Курс ${nextIndex}` }] }));
   }
 
-  function addCriterionLocal() {
-    if (!newCriterion.name.trim()) return;
-    const id = `cr-${Date.now()}`;
-    const newC: Criterion = { id, name: newCriterion.name, description: newCriterion.description, group: MISC_GROUP, filledBy: newCriterion.filledBy };
-    setData((prev) => ({ ...prev, criteria: [...prev.criteria, newC] }));
-    setNewCriterion({ name: "", description: "", filledBy: "" });
-    setAddCriterionOpen(false);
-    if (APPS_SCRIPT_URL) {
-      fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ action: "addCriterion", apiKey: getApiKey(), tab: tabToSheet[activeTab], criterion: newC }) }).catch(() => console.warn("Не удалось записать критерий в таблицу"));
+// заменяем существующую функцию
+async function addCriterionLocal() {
+  const name = newCriterion.name.trim();
+  if (!name) return;
+
+  const id = `cr-${Date.now()}`;
+  const description = newCriterion.description.trim();
+  const filledBy = newCriterion.filledBy.trim();
+
+  // локально добавим критерий в группу «Прочие критерии»
+  const newC: Criterion = { id, name, description, group: MISC_GROUP, filledBy };
+  setData((prev) => ({ ...prev, criteria: [...prev.criteria, newC] }));
+
+  // сбросим состояние формы/модалки
+  setNewCriterion({ name: "", description: "", filledBy: "" });
+  setAddCriterionOpen(false);
+
+  // запись в Google Sheets: метаданные критерия + (опционально) пустые ячейки под все курсы
+  if (APPS_SCRIPT_URL) {
+    const sheetName = tabToSheet[activeTab];
+
+    // 1) метаданные критерия: section/criterion/description/filled_by/criterionId
+    try {
+      await fetch(APPS_SCRIPT_URL, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain" }, // ВАЖНО: только text/plain
+        body: JSON.stringify({
+          action: "upsertCriterion",
+          apiKey: getApiKey(),
+          tab: sheetName,
+          criterionId: id,
+          section: "Прочие критерии",
+          criterion: name,
+          description,
+          filled_by: filledBy,
+        }),
+      });
+    } catch (e) {
+      console.warn("Не удалось записать метаданные критерия в таблицу", e);
+    }
+
+    // 2) (рекомендуется) пропраймить пустые ячейки, чтобы строка сразу появилась в матрице
+    try {
+      await Promise.all(
+        (data.courses || []).map((c) =>
+          fetch(APPS_SCRIPT_URL, {
+            method: "POST",
+            headers: { "Content-Type": "text/plain" },
+            body: JSON.stringify({
+              action: "upsertCell",
+              apiKey: getApiKey(),
+              tab: sheetName,
+              courseId: c.id,
+              criterionId: id,
+              text: "",
+              images: [],
+            }),
+          })
+        )
+      );
+    } catch (e) {
+      console.warn("Не удалось создать пустые ячейки для нового критерия", e);
     }
   }
+}
 
   const toggleGroup = (group: string) => setCollapsedGroups((prev) => ({ ...prev, [group]: !prev[group] }));
 
