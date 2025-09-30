@@ -22,9 +22,6 @@ import {
 /**
  * ===========================================================
  *  Competitor Matrix (Sheets-driven)
- *  — грузим данные из Google Sheets (GViz);
- *  — пишем правки в Apps Script (только text/plain!);
- *  — добавление критерия: upsertCriterion + upsertCell для курсов.
  * ===========================================================
  */
 
@@ -81,27 +78,52 @@ async function fetchWithTimeout(
   }
 }
 
+/** Парсинг GViz: первая строка — заголовки, далее — данные */
 async function fetchGViz(sheet: string): Promise<SheetRow[]> {
   const res = await fetchWithTimeout(gvizUrl(sheet), { credentials: "omit" });
   if (!res.ok) throw new Error(`Failed to fetch sheet ${sheet}: ${res.status}`);
-  const text = await res.text();
+  const txt = await res.text();
 
-  // GViz JSON завернут в вызов функции — достаём JSON
-  const m = text.match(/google\.visualization\.Query\.setResponse\(([\s\S]+)\)/);
-  if (!m) return [];
-  const parsed = JSON.parse(m[1]);
-  const cols = (parsed.table.cols || []).map((c: any) => c.label || c.id || "");
-  const rows = (parsed.table.rows || []).map((r: any) => {
-    const obj: Record<string, string> = {};
-    (r.c || []).forEach((cell: any, i: number) => {
-      obj[cols[i] || `col_${i}`] =
-        cell && cell.v != null ? String(cell.v) : "";
-    });
-    return obj as SheetRow;
-  });
-  return rows;
+  // Достаём JSON из вызова setResponse(...)
+  const start = txt.indexOf("{");
+  const end = txt.lastIndexOf("}");
+  if (start === -1 || end === -1) throw new Error("GViz: JSON not found");
+  const json = JSON.parse(txt.slice(start, end + 1));
+
+  const rows: any[] = json.table?.rows || [];
+  const matrix: string[][] = rows.map((r: any) =>
+    (r.c || []).map((c: any) => (c && (c.f ?? c.v)) ?? "")
+  );
+
+  if (!matrix.length) return [];
+
+  // заголовок — первая строка (если пустая, ищем первую непустую)
+  let header = (matrix[0] || []).map((h) => String(h ?? "").trim());
+  let dataRows = matrix.slice(1);
+  if (header.every((h) => !h)) {
+    const idx = matrix.findIndex((r) => r.some((v) => String(v).trim()));
+    if (idx > -1) {
+      header = (matrix[idx] || []).map((h) => String(h ?? "").trim());
+      dataRows = matrix.slice(idx + 1);
+    }
+  }
+
+  // фильтруем пустые строки данных
+  dataRows = dataRows.filter((r) => r.some((v) => String(v).trim()));
+
+  // если заголовки пустые — сгенерим col_0, col_1, ...
+  if (!header.some((h) => h)) {
+    header = (dataRows[0] || []).map((_, i) => `col_${i}`);
+  }
+
+  return dataRows.map((row) =>
+    Object.fromEntries(
+      header.map((h, i) => [h, (row[i] ?? "") as string])
+    )
+  );
 }
 
+/** API-key для записи */
 function getApiKey() {
   try {
     if (typeof window !== "undefined") {
@@ -118,6 +140,7 @@ function setApiKey(v: string) {
   } catch {}
 }
 
+/** Drive/URL helpers */
 function extractDriveId(u: string) {
   try {
     const m1 = u.match(/\/file\/d\/([^/]+)/);
@@ -127,8 +150,6 @@ function extractDriveId(u: string) {
   } catch {}
   return null;
 }
-
-/** Единственный normalizeImageUrl в файле */
 function normalizeImageUrl(u: string): string {
   if (!u) return u;
   const id = extractDriveId(u);
@@ -140,10 +161,59 @@ function normalizeImageUrl(u: string): string {
   return u;
 }
 
+/** Толерантный разбор листа __tabs */
+function rowsToTabs(rows: SheetRow[]): { tabs: Tab[]; mapping: Record<string, string> } {
+  const out: Tab[] = [];
+  const map: Record<string, string> = {};
+
+  for (const r of rows) {
+    const keyMap: Record<string, string> = {};
+    for (const k of Object.keys(r)) keyMap[k.toLowerCase().trim()] = k;
+
+    const sheetKey =
+      keyMap["sheet"] ??
+      keyMap["лист"] ??
+      keyMap["tab"] ??
+      keyMap["sheet_name"] ??
+      keyMap["sheetname"] ??
+      keyMap["страница"] ??
+      null;
+
+    const labelKey =
+      keyMap["label"] ??
+      keyMap["вкладка"] ??
+      keyMap["название"] ??
+      keyMap["name"] ??
+      keyMap["title"] ??
+      null;
+
+    let sheet = sheetKey ? String(r[sheetKey]).trim() : "";
+    let label = labelKey ? String(r[labelKey]).trim() : "";
+
+    // Фолбек: берем первые две непустые колонки как sheet/label
+    if (!sheet || !label) {
+      const values = Object.values(r).map((v) => String(v || "").trim()).filter(Boolean);
+      if (!sheet && values[0]) sheet = values[0];
+      if (!label && values[1]) label = values[1] || sheet;
+    }
+
+    if (!sheet) continue;
+    if (!label) label = sheet;
+
+    const id = label; // id вкладки = её label (удобно для кнопок)
+    out.push({ id, label });
+    map[id] = sheet;
+  }
+
+  return { tabs: out, mapping: map };
+}
+
 /** Преобразование строк GViz в структуру матрицы */
 function rowsToMatrix(rows: SheetRow[]): MatrixData {
   const allKeys = new Set<string>();
   rows.forEach((r) => Object.keys(r).forEach((k) => allKeys.add(k)));
+
+  // course ids по суффиксу "_text"
   const courseIds = Array.from(allKeys)
     .filter((k) => k.endsWith("_text"))
     .map((k) => k.slice(0, -"_text".length))
@@ -164,10 +234,9 @@ function rowsToMatrix(rows: SheetRow[]): MatrixData {
   rows.forEach((r, idx) => {
     const group = String(r.section || "").trim();
     const name = String(r.criterion || "").trim();
-    theconst: any = null; // (safety no-op to avoid accidental top-level returns)
     const description = String(r.description || "").trim();
-    const filledBy = String(r.filled_by || r.filledBy || "").trim();
-    const criterionId = String(r.criterion_id || r.criterionId || "").trim();
+    const filledBy = String((r as any).filled_by || (r as any).filledBy || "").trim();
+    const criterionId = String((r as any).criterion_id || (r as any).criterionId || "").trim();
 
     if (!criterionId && !name && !group && !description) return;
 
@@ -181,8 +250,8 @@ function rowsToMatrix(rows: SheetRow[]): MatrixData {
     });
 
     courseIds.forEach((cid) => {
-      const text = String(r[`${cid}_text`] || "").trim();
-      const imagesRaw = String(r[`${cid}_images`] || "").trim();
+      const text = String((r as any)[`${cid}_text`] || "").trim();
+      const imagesRaw = String((r as any)[`${cid}_images`] || "").trim();
       const images: Img[] = imagesRaw
         ? imagesRaw
             .split(/\r?\n/)
@@ -194,21 +263,17 @@ function rowsToMatrix(rows: SheetRow[]): MatrixData {
     });
   });
 
-  // Добавим «курс» как несворачиваемую «квази-строку»
+  // «Курс» как несворачиваемая «квази-строка»
   if (!criteria.find((c) => c.id === COURSE_CRIT_ID)) {
-    criteria.unshift({
-      id: COURSE_CRIT_ID,
-      name: "Курс",
-      group: COURSE_GROUP,
-    });
+    criteria.unshift({ id: COURSE_CRIT_ID, name: "Курс", group: COURSE_GROUP });
   }
 
   return { criteria, courses, cells };
 }
 
 /** ===== Вьюшные помощники ===== */
-function Img({ url, alt, className }: { url: string; alt: string; className?: string }) {
-  return <img src={normalizeImageUrl(url)} alt={alt} className={className} />;
+function Img({ url, alt, className }: { url: string; alt?: string; className?: string }) {
+  return <img src={normalizeImageUrl(url)} alt={alt || "image"} className={className} />;
 }
 
 function CriterionHeader({ k }: { k: Criterion }) {
@@ -216,12 +281,10 @@ function CriterionHeader({ k }: { k: Criterion }) {
     <div className="font-medium border-b px-2 py-2">
       <div className="text-sm">{k.name}</div>
       {k.description ? (
-        <div className="text-xs text-muted-foreground">{k.description}</div>
+        <div className="text-xs text-muted-foreground whitespace-pre-wrap">{k.description}</div>
       ) : null}
       {k.filledBy ? (
-        <div className="text-[11px] text-muted-foreground mt-1">
-          Кто заполняет: {k.filledBy}
-        </div>
+        <div className="text-[11px] text-muted-foreground mt-1">Кто заполняет: {k.filledBy}</div>
       ) : null}
     </div>
   );
@@ -247,12 +310,7 @@ function CellCardView({
           {imgs.length > 0 && (
             <div className="flex gap-2 mt-2 flex-wrap">
               {imgs.map((img, i) => (
-                <Img
-                  key={i}
-                  url={img.url}
-                  alt={img.caption || "preview"}
-                  className="h-12 w-12 object-cover rounded"
-                />
+                <Img key={i} url={img.url} alt={img.caption || "preview"} className="h-12 w-12 object-cover rounded" />
               ))}
             </div>
           )}
@@ -270,13 +328,7 @@ function CellCardView({
   );
 }
 
-function CourseHeaderCell({
-  cLabel,
-  onHide,
-}: {
-  cLabel: string;
-  onHide: () => void;
-}) {
+function CourseHeaderCell({ cLabel, onHide }: { cLabel: string; onHide: () => void }) {
   return (
     <div className="font-medium border-b px-2 py-2 flex items-center justify-between gap-2">
       <span>{cLabel}</span>
@@ -295,31 +347,23 @@ export default function CompetitorMatrix() {
   const [activeTab, setActiveTab] = useState<string>("");
 
   /** матрица */
-  const [data, setData] = useState<MatrixData>({
-    criteria: [],
-    courses: [],
-    cells: [],
-  });
+  const [data, setData] = useState<MatrixData>({ criteria: [], courses: [], cells: [] });
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   /** просмотр/редактирование ячейки */
-  const [open, setOpen] = useState<{ courseId: string; criterionId: string } | null>(
-    null
-  );
-  const [edit, setEdit] = useState<{ courseId: string; criterionId: string } | null>(
-    null
-  );
+  const [open, setOpen] = useState<{ courseId: string; criterionId: string } | null>(null);
+  const [edit, setEdit] = useState<{ courseId: string; criterionId: string } | null>(null);
   const [draftText, setDraftText] = useState("");
   const [draftImages, setDraftImages] = useState("");
 
   /** добавление критерия */
   const [addCriterionOpen, setAddCriterionOpen] = useState(false);
-  const [newCriterion, setNewCriterion] = useState<{
-    name: string;
-    description: string;
-    filledBy: string;
-  }>({ name: "", description: "", filledBy: "" });
+  const [newCriterion, setNewCriterion] = useState<{ name: string; description: string; filledBy: string }>({
+    name: "",
+    description: "",
+    filledBy: "",
+  });
 
   /** скрытие курсов */
   const [hiddenCourses, setHiddenCourses] = useState<string[]>(() => {
@@ -336,56 +380,34 @@ export default function CompetitorMatrix() {
     [data.courses, hiddenCourses]
   );
 
-  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>(
-    {}
-  );
-
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
   const [viewerIndex, setViewerIndex] = useState(0);
 
   /** загрузка вкладок */
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       try {
         const rows = await fetchGViz(TABS_INDEX_SHEET);
-        if (!rows.length) {
-          throw new Error("Нет вкладок (__tabs) — проверь лист и его доступность");
-        }
-
-        const t: Tab[] = [];
-        const map: Record<string, string> = {};
-
-        rows.forEach((r, idx) => {
-          // допускаем разные заголовки колонок
-          const keys = Object.fromEntries(
-            Object.keys(r).map((k) => [k.toLowerCase().trim(), k])
-          );
-          const sheetKey =
-            keys.sheet ?? keys["лист"] ?? keys["tab"] ?? keys["sheet_name"] ?? "sheet";
-          const labelKey =
-            keys.label ?? keys["вкладка"] ?? keys["название"] ?? "label";
-
-          const sheet = String(r[sheetKey] || "").trim();
-          const label = String(r[labelKey] || "").trim() || sheet || `Tab ${idx + 1}`;
-          if (!sheet) return;
-
-          const id = label;
-          t.push({ id, label });
-          map[id] = sheet;
-        });
-
+        if (cancelled) return;
+        const { tabs: t, mapping } = rowsToTabs(rows);
+        if (t.length === 0) throw new Error("Нет вкладок (__tabs) — проверь лист и его доступность");
         setTabs(t);
-        setTabToSheet(map);
-        if (!t.length) throw new Error("Нет вкладок (__tabs)");
-        setActiveTab((prev) => (prev && map[prev] ? prev : t[0].id));
+        setTabToSheet(mapping);
+        setActiveTab((prev) => (prev && mapping[prev] ? prev : t[0].id));
       } catch (e: any) {
         setLoadError(e?.message || String(e));
       }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   /** загрузка данных активной вкладки */
   useEffect(() => {
     if (!activeTab) return;
+    let cancelled = false;
     (async () => {
       setLoading(true);
       setLoadError(null);
@@ -393,22 +415,26 @@ export default function CompetitorMatrix() {
         const sheet = tabToSheet[activeTab];
         if (!sheet) throw new Error("Лист не найден для вкладки");
         const rows = await fetchGViz(sheet);
+        if (cancelled) return;
         const matrix = rowsToMatrix(rows);
         setData(matrix);
+
         // раскрыть все группы по умолчанию
         const nextGroups: Record<string, boolean> = {};
         matrix.criteria.forEach((c) => {
-          const g =
-            c.group && c.group !== "XI. Прочее" ? c.group : MISC_GROUP;
+          const g = c.group && c.group !== "XI. Прочее" ? c.group : MISC_GROUP;
           nextGroups[g] = false;
         });
         setCollapsedGroups(nextGroups);
       } catch (e: any) {
         setLoadError(e?.message || String(e));
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [activeTab, tabToSheet]);
 
   /** геттер ячейки */
@@ -425,9 +451,7 @@ export default function CompetitorMatrix() {
     // локально
     setData((prev) => {
       const next = { ...prev, cells: [...prev.cells] };
-      const idx = next.cells.findIndex(
-        (c) => c.courseId === courseId && c.criterionId === criterionId
-      );
+      const idx = next.cells.findIndex((c) => c.courseId === courseId && c.criterionId === criterionId);
       const cell: Cell = {
         courseId,
         criterionId,
@@ -455,14 +479,9 @@ export default function CompetitorMatrix() {
       criterionId,
       criterion: crit?.name || "",
       text,
-      images: imagesLines
-        .split(/\r?\n/)
-        .map((s) => s.trim())
-        .filter(Boolean),
+      images: imagesLines.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
       updatedBy:
-        (typeof window !== "undefined" &&
-          (localStorage.getItem("user_name") || "anonymous")) ||
-        "anonymous",
+        (typeof window !== "undefined" && (localStorage.getItem("user_name") || "anonymous")) || "anonymous",
     } as const;
 
     try {
@@ -476,15 +495,9 @@ export default function CompetitorMatrix() {
       try {
         json = JSON.parse(raw);
       } catch {}
-      const unauthorized =
-        !!(json &&
-          typeof json.error === "string" &&
-          json.error.toUpperCase().includes("UNAUTHORIZED"));
+      const unauthorized = !!(json && typeof json.error === "string" && json.error.toUpperCase().includes("UNAUTHORIZED"));
       if (unauthorized) {
-        const key =
-          typeof window !== "undefined"
-            ? window.prompt("Введите API_KEY для записи в таблицу", "")
-            : null;
+        const key = typeof window !== "undefined" ? window.prompt("Введите API_KEY для записи в таблицу", "") : null;
         if (key) {
           setApiKey(key);
           await fetch(APPS_SCRIPT_URL, {
@@ -539,13 +552,7 @@ export default function CompetitorMatrix() {
     const filledBy = newCriterion.filledBy.trim();
 
     // локально добавим критерий в «Прочие критерии»
-    const newC: Criterion = {
-      id,
-      name,
-      description,
-      filledBy,
-      group: MISC_GROUP,
-    };
+    const newC: Criterion = { id, name, description, filledBy, group: MISC_GROUP };
     setData((prev) => ({ ...prev, criteria: [...prev.criteria, newC] }));
 
     // сброс формы
@@ -601,11 +608,7 @@ export default function CompetitorMatrix() {
 
   /** ===== Рендер ===== */
   if (loadError) {
-    return (
-      <div className="p-4 text-sm text-red-600">
-        Ошибка загрузки: {String(loadError)}
-      </div>
-    );
+    return <div className="p-4 text-sm text-red-600">Ошибка загрузки: {String(loadError)}</div>;
   }
   if (loading && !data.criteria.length) {
     return <div className="p-4 text-sm text-muted-foreground">Загрузка…</div>;
@@ -617,8 +620,8 @@ export default function CompetitorMatrix() {
       <div className="flex gap-2 overflow-x-auto pb-3 -mt-1">
         {tabs.length === 0 ? (
           <span className="text-xs text-muted-foreground">
-            Нет вкладок. Создайте лист <code>__tabs</code> с колонками{" "}
-            <code>sheet</code>, <code>label</code>.
+            Нет вкладок. Создайте лист <code>__tabs</code> со столбцами <code>sheet</code> и{" "}
+            <code>label</code> (регистр не важен; можно «лист/вкладка»). Первая строка — заголовки.
           </span>
         ) : (
           tabs.map((t) => (
@@ -639,9 +642,7 @@ export default function CompetitorMatrix() {
       <div className="flex justify-between items-center mb-4">
         <h1 className="text-lg font-bold">
           Матрица анализа конкурентов —{" "}
-          <span className="font-normal">
-            {tabs.find((t) => t.id === activeTab)?.label || "—"}
-          </span>
+          <span className="font-normal">{tabs.find((t) => t.id === activeTab)?.label || "—"}</span>
         </h1>
         <div className="flex gap-2 items-center">
           <Button
@@ -660,11 +661,7 @@ export default function CompetitorMatrix() {
             Сменить разворот групп
           </Button>
 
-          <Button
-            variant="default"
-            size="sm"
-            onClick={() => setAddCriterionOpen(true)}
-          >
+          <Button variant="default" size="sm" onClick={() => setAddCriterionOpen(true)}>
             <Plus className="h-4 w-4 mr-1" /> Добавить критерий
           </Button>
         </div>
@@ -681,34 +678,19 @@ export default function CompetitorMatrix() {
         {/* Заголовки курсов */}
         <div className="px-2 py-2 border-b font-semibold">Критерий</div>
         {visibleCourses.map((c, i) => (
-          <CourseHeaderCell
-            key={c.id}
-            cLabel={`Курс ${i + 1}`}
-            onHide={() => hideCourse(c.id)}
-          />
+          <CourseHeaderCell key={c.id} cLabel={`Курс ${i + 1}`} onHide={() => hideCourse(c.id)} />
         ))}
 
         {/* Группы и строки */}
         {Object.entries(groupedCriteria).map(([group, criteria]) => (
           <React.Fragment key={group}>
             <div className="col-span-full flex items-center bg-gray-100 px-2 py-2 border-t">
-              <div
-                className="flex items-center gap-1 flex-1 cursor-pointer"
-                onClick={() => toggleGroup(group)}
-              >
-                {collapsedGroups[group] ? (
-                  <ChevronRight className="h-4 w-4" />
-                ) : (
-                  <ChevronDown className="h-4 w-4" />
-                )}
+              <div className="flex items-center gap-1 flex-1 cursor-pointer" onClick={() => toggleGroup(group)}>
+                {collapsedGroups[group] ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
                 <span className="font-semibold text-sm">{group}</span>
               </div>
               {group === MISC_GROUP && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => setAddCriterionOpen(true)}
-                >
+                <Button size="sm" variant="outline" onClick={() => setAddCriterionOpen(true)}>
                   <Plus className="h-4 w-4 mr-1" /> Добавить критерий
                 </Button>
               )}
@@ -728,9 +710,7 @@ export default function CompetitorMatrix() {
                         onEdit={() => {
                           setEdit({ courseId: c.id, criterionId: k.id });
                           setDraftText(cell?.text || "");
-                          setDraftImages(
-                            (cell?.images || []).map((i) => i.url).join("\n")
-                          );
+                          setDraftImages((cell?.images || []).map((i) => i.url).join("\n"));
                         }}
                       />
                     );
@@ -750,12 +730,7 @@ export default function CompetitorMatrix() {
                 <DialogTitle>
                   Просмотр:{" "}
                   {getCell(open.courseId, COURSE_CRIT_ID)?.text?.trim() ||
-                    `Курс ${
-                      Math.max(
-                        1,
-                        data.courses.findIndex((x) => x.id === open.courseId) + 1
-                      )
-                    }`}
+                    `Курс ${Math.max(1, data.courses.findIndex((x) => x.id === open.courseId) + 1)}`}
                 </DialogTitle>
               </DialogHeader>
               <div className="text-sm whitespace-pre-wrap mb-4">
@@ -765,10 +740,7 @@ export default function CompetitorMatrix() {
                 const cell = getCell(open.courseId, open.criterionId);
                 const imgs = cell?.images || [];
                 if (!imgs.length) return null;
-                const clampedIndex = Math.min(
-                  Math.max(0, viewerIndex),
-                  imgs.length - 1
-                );
+                const clampedIndex = Math.min(Math.max(0, viewerIndex), imgs.length - 1);
                 const current = imgs[clampedIndex];
                 return (
                   <div className="flex flex-col gap-3 items-center">
@@ -784,9 +756,7 @@ export default function CompetitorMatrix() {
                         type="button"
                         size="icon"
                         variant="outline"
-                        onClick={() =>
-                          setViewerIndex((i) => Math.max(0, i - 1))
-                        }
+                        onClick={() => setViewerIndex((i) => Math.max(0, i - 1))}
                         disabled={clampedIndex <= 0}
                         title="Назад"
                       >
@@ -799,22 +769,13 @@ export default function CompetitorMatrix() {
                         type="button"
                         size="icon"
                         variant="outline"
-                        onClick={() =>
-                          setViewerIndex((i) =>
-                            Math.min(imgs.length - 1, i + 1)
-                          )
-                        }
+                        onClick={() => setViewerIndex((i) => Math.min(imgs.length - 1, i + 1))}
                         disabled={clampedIndex >= imgs.length - 1}
                         title="Вперёд"
                       >
                         <ChevronRight className="h-4 w-4" />
                       </Button>
-                      <a
-                        className="ml-auto underline text-xs"
-                        href={current.url}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
+                      <a className="ml-auto underline text-xs" href={current.url} target="_blank" rel="noreferrer">
                         Открыть оригинал
                       </a>
                     </div>
@@ -851,17 +812,13 @@ export default function CompetitorMatrix() {
                     className="border rounded-md p-2 text-sm min-h-[140px] w-full mt-1 resize-y"
                   />
                   <div className="text-xs text-muted-foreground">
-                    Поддерживаются прямые ссылки (jpg/png/webp/…) и Google Drive
-                    в форматах <code>/file/d/FILE_ID</code>,{" "}
-                    <code>?id=FILE_ID</code>; конвертируются в{" "}
-                    <code>uc?export=view</code>.
+                    Поддерживаются прямые ссылки (jpg/png/webp/…) и Google Drive в форматах{" "}
+                    <code>/file/d/FILE_ID</code>, <code>?id=FILE_ID</code>; конвертируются в <code>uc?export=view</code>.
                   </div>
                 </div>
               </div>
               <DialogFooter className="pt-2">
-                <Button onClick={() => saveCell(edit.courseId, edit.criterionId)}>
-                  Сохранить
-                </Button>
+                <Button onClick={() => saveCell(edit.courseId, edit.criterionId)}>Сохранить</Button>
                 <Button variant="outline" onClick={() => setEdit(null)}>
                   Отмена
                 </Button>
@@ -882,9 +839,7 @@ export default function CompetitorMatrix() {
               <Label>Название критерия</Label>
               <input
                 value={newCriterion.name}
-                onChange={(e) =>
-                  setNewCriterion((s) => ({ ...s, name: e.target.value }))
-                }
+                onChange={(e) => setNewCriterion((s) => ({ ...s, name: e.target.value }))}
                 className="border rounded-md p-2 text-sm w-full mt-1"
                 placeholder="например, Наличие практикума"
               />
@@ -893,9 +848,7 @@ export default function CompetitorMatrix() {
               <Label>Описание</Label>
               <input
                 value={newCriterion.description}
-                onChange={(e) =>
-                  setNewCriterion((s) => ({ ...s, description: e.target.value }))
-                }
+                onChange={(e) => setNewCriterion((s) => ({ ...s, description: e.target.value }))}
                 className="border rounded-md p-2 text-sm w-full mt-1"
                 placeholder="как измеряем или что подразумевается"
               />
@@ -904,9 +857,7 @@ export default function CompetitorMatrix() {
               <Label>Кто заполняет</Label>
               <input
                 value={newCriterion.filledBy}
-                onChange={(e) =>
-                  setNewCriterion((s) => ({ ...s, filledBy: e.target.value }))
-                }
+                onChange={(e) => setNewCriterion((s) => ({ ...s, filledBy: e.target.value }))}
                 className="border rounded-md p-2 text-sm w-full mt-1"
                 placeholder="роль/отдел/ФИО"
               />
@@ -914,9 +865,7 @@ export default function CompetitorMatrix() {
           </div>
           <DialogFooter className="pt-2">
             <Button onClick={addCriterionLocal}>Добавить</Button>
-            <Button variant="outline" onClick={() => setAddCriterionOpen(false)}>
-              Отмена
-            </Button>
+            <Button variant="outline" onClick={() => setAddCriterionOpen(false)}>Отмена</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
