@@ -290,7 +290,7 @@ export default function CompetitorMatrix() {
 
     if (!APPS_SCRIPT_URL) return;
     try {
-      let res = await fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+      let res = await fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify(payload) });
       const raw = await res.text();
       let json: any = null; try { json = JSON.parse(raw); } catch { /* not JSON */ }
       const unauthorized = !!(json && typeof json.error === "string" && json.error.toUpperCase().includes("UNAUTHORIZED"));
@@ -298,7 +298,7 @@ export default function CompetitorMatrix() {
         const key = typeof window !== "undefined" ? window.prompt("Введите API_KEY для записи в таблицу", "") : null;
         if (key) {
           setApiKey(key);
-          await fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...payload, apiKey: key }) });
+          await fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ ...payload, apiKey: key }) });
         }
       }
     } catch (e) {
@@ -322,7 +322,7 @@ export default function CompetitorMatrix() {
     const newCourseId = `c${nextIndex}`;
     if (APPS_SCRIPT_URL) {
       try {
-        const res = await fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "addCourse", apiKey: getApiKey(), tab: tabToSheet[activeTab], courseId: newCourseId }) });
+        const res = await fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ action: "addCourse", apiKey: getApiKey(), tab: tabToSheet[activeTab], courseId: newCourseId }) });
         if (!res.ok) throw new Error("Не удалось добавить курс в таблицу");
       } catch (e) {
         console.warn("Apps Script недоступен, добавление только локально", e);
@@ -339,7 +339,7 @@ export default function CompetitorMatrix() {
     setNewCriterion({ name: "", description: "", filledBy: "" });
     setAddCriterionOpen(false);
     if (APPS_SCRIPT_URL) {
-      fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "addCriterion", apiKey: getApiKey(), tab: tabToSheet[activeTab], criterion: newC }) }).catch(() => console.warn("Не удалось записать критерий в таблицу"));
+      fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ action: "addCriterion", apiKey: getApiKey(), tab: tabToSheet[activeTab], criterion: newC }) }).catch(() => console.warn("Не удалось записать критерий в таблицу"));
     }
   }
 
