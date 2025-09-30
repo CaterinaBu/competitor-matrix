@@ -70,10 +70,24 @@ function extractDriveId(u: string): string | null {
   } catch { /* no‑op */ }
   return null;
 }
+
+// Нормализуем ссылки: прямые URL оставляем как есть,
+// Google Drive вида /file/d/.. или ?id=.. превращаем в прямой CDN превью.
 function normalizeImageUrl(u: string): string {
-  if (!u) return u;
-  const id = extractDriveId(u);
-  return id ? `https://drive.google.com/uc?export=view&id=${id}` : u;
+  try {
+    const url = new URL(u);
+    if (url.hostname.includes("drive.google.com")) {
+      // извлечь id из /file/d/<id>/... или из ?id=<id>
+      const byPath = url.pathname.split("/d/")[1]?.split("/")[0];
+      const byQuery = url.searchParams.get("id");
+      const id = byPath || byQuery || "";
+      // максимально «крупный» превью CDN Google
+      return id ? `https://lh3.googleusercontent.com/d/${id}=s2048` : u;
+    }
+    return u;
+  } catch {
+    return u;
+  }
 }
 
 function rowsToMatrix(rows: SheetRow[]): MatrixData {
@@ -178,19 +192,6 @@ function CourseHeaderCell({ cLabel, onHide }: { cLabel: string; onHide: () => vo
       </Button>
     </div>
   );
-}
-
-// --- helper: нормализация ссылок на изображения (Drive и прямые URL)
-function normalizeImageUrl(u) {
-  try {
-    const url = new URL(u);
-    if (/\.(png|jpe?g|webp|gif|svg)(\?.*)?$/i.test(url.pathname)) return u;
-    const m1 = url.pathname.match(/\/file\/d\/([^/]+)/);
-    const m2 = url.search.match(/(?:\?|&)id=([^&]+)/);
-    const id = (m1 && m1[1]) || (m2 && m2[1]);
-    if (id) return `https://drive.google.com/thumbnail?id=${id}&sz=w2000`;
-    return u;
-  } catch { return u; }
 }
 
 export default function CompetitorMatrix() {
