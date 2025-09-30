@@ -1,219 +1,98 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-} from "@/components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Card, CardContent } from "@/components/ui/card";
-import {
-  Maximize2,
-  Edit3,
-  ChevronDown,
-  ChevronRight,
-  Plus,
-  EyeOff,
-  ChevronLeft,
-} from "lucide-react";
+import { Maximize2, Edit3, ChevronDown, ChevronRight, ChevronLeft, Plus, EyeOff } from "lucide-react";
 
-/**
- * ===========================================================
- *  Competitor Matrix (Sheets-driven)
- * ===========================================================
- */
+// =================================================
+// Sheets‑driven прототип (упрощённая версия)
+// — всё загружается из Google Sheets
+// — никаких top‑level return/JSX, лишних dev‑вставок и незакрытых тегов
+// — просмотр изображений: большая картинка + ползунок + стрелки + «Открыть оригинал»
+// =================================================
 
-/** ===== Конфигурация (жёсткий ID твоей таблицы) ===== */
-const SHEET_ID = "1IouEV_O2wnycNDzl3Xlu56cCbQT40kaPwyJSxAbipiU";
+// === Конфигурация ===
+const SHEET_ID = "1IouEV_O2wnycNDzl3Xlu56cCbQT40kaPwyJSxAbipiU"; // Google Sheet
+const APPS_SCRIPT_URL: string | null = "https://script.google.com/macros/s/AKfycbx_vRMftnV2wNNO1A_oy3w6LkVVWbWF2r1Q6ORGXNJKihNOBKHmKydjZI4DgnQ2sghH/exec"; // WebApp для записи
+const TABS_INDEX_SHEET = "__tabs"; // индекс вкладок (колонки: sheet, label[, id])
 
-const APPS_SCRIPT_URL =
-  "https://script.google.com/macros/library/d/1A6LAp-4_zpnmBRv3RsAZ8yRY5imq7TO7XwSLm76fiR5Yy7Oy1QeOxRUe/6";
-
-const TABS_INDEX_SHEET = "__tabs"; // лист с колонками: sheet, label
-
-/** ===== Константы матрицы ===== */
-const COURSE_CRIT_ID = "course_meta";
-const COURSE_GROUP = "0. Курс";
-const MISC_GROUP = "Прочие критерии";
-
-/** ===== Типы ===== */
+// === Типы ===
+type Criterion = { id: string; name: string; group?: string; description?: string; filledBy?: string };
 type Course = { id: string; name: string };
-type Criterion = {
-  id: string;
-  name: string;
-  description?: string;
-  group?: string;
-  filledBy?: string;
-};
-type Img = { url: string; caption?: string };
-type Cell = {
-  courseId: string;
-  criterionId: string;
-  text: string;
-  images: Img[];
-};
+type Cell = { courseId: string; criterionId: string; text?: string; images?: { url: string; caption?: string }[] };
+
 type MatrixData = { criteria: Criterion[]; courses: Course[]; cells: Cell[] };
-type SheetRow = Record<string, string>;
+
 type Tab = { id: string; label: string };
 
-/** ===== Утилиты ===== */
-const gvizUrl = (sheet: string) =>
-  `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(
-    sheet
-  )}`;
+type SheetRow = Record<string, string>;
 
-async function fetchWithTimeout(
-  resource: string,
-  opts: RequestInit = {},
-  timeoutMs = 12000
-) {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(resource, { ...opts, signal: controller.signal });
-  } finally {
-    clearTimeout(id);
-  }
+// === Константы матрицы ===
+const COURSE_CRIT_ID = "course_meta"; // несворачиваемый «Курс»
+const COURSE_GROUP = "0. Курс";      // группа для «Курс» (заголовок не показываем в UI)
+const MISC_GROUP   = "Прочие критерии"; // куда падают новые критерии
+
+// === Утилиты ===
+const getApiKey = () => (typeof window !== "undefined" && localStorage.getItem("gs_api_key")) || "";
+const setApiKey = (v: string) => { try { if (typeof window !== "undefined") localStorage.setItem("gs_api_key", v || ""); } catch { /* no‑op */ } };
+
+function gvizUrl(sheet: string) {
+  return `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(sheet)}`;
 }
 
-/** Парсинг GViz: первая строка — заголовки, далее — данные */
+async function fetchWithTimeout(resource: string, opts: RequestInit = {}, timeoutMs = 12000) {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try { return await fetch(resource, { ...opts, signal: controller.signal }); }
+  finally { clearTimeout(id); }
+}
+
 async function fetchGViz(sheet: string): Promise<SheetRow[]> {
   const res = await fetchWithTimeout(gvizUrl(sheet), { credentials: "omit" });
   if (!res.ok) throw new Error(`Failed to fetch sheet ${sheet}: ${res.status}`);
   const txt = await res.text();
-
-  // Достаём JSON из вызова setResponse(...)
   const start = txt.indexOf("{");
   const end = txt.lastIndexOf("}");
   if (start === -1 || end === -1) throw new Error("GViz: JSON not found");
   const json = JSON.parse(txt.slice(start, end + 1));
-
   const rows: any[] = json.table?.rows || [];
-  const matrix: string[][] = rows.map((r: any) =>
-    (r.c || []).map((c: any) => (c && (c.f ?? c.v)) ?? "")
-  );
-
-  if (!matrix.length) return [];
-
-  // заголовок — первая строка (если пустая, ищем первую непустую)
-  let header = (matrix[0] || []).map((h) => String(h ?? "").trim());
-  let dataRows = matrix.slice(1);
-  if (header.every((h) => !h)) {
-    const idx = matrix.findIndex((r) => r.some((v) => String(v).trim()));
-    if (idx > -1) {
-      header = (matrix[idx] || []).map((h) => String(h ?? "").trim());
-      dataRows = matrix.slice(idx + 1);
-    }
-  }
-
-  // фильтруем пустые строки данных
-  dataRows = dataRows.filter((r) => r.some((v) => String(v).trim()));
-
-  // если заголовки пустые — сгенерим col_0, col_1, ...
-  if (!header.some((h) => h)) {
-    header = (dataRows[0] || []).map((_, i) => `col_${i}`);
-  }
-
-  return dataRows.map((row) =>
-    Object.fromEntries(
-      header.map((h, i) => [h, (row[i] ?? "") as string])
-    )
-  );
+  const matrix: string[][] = rows.map((r: any) => (r.c || []).map((c: any) => (c && (c.f ?? c.v)) ?? ""));
+  const header = (matrix[0] || []).map((h) => String(h).trim());
+  const dataRows = matrix.slice(1).filter((r) => r.some((v) => String(v).trim().length > 0));
+  return dataRows.map((row) => Object.fromEntries(header.map((h, i) => [h, row[i] ?? ""]) as [string, string][]));
 }
 
-/** API-key для записи */
-function getApiKey() {
+function extractDriveId(u: string): string | null {
   try {
-    if (typeof window !== "undefined") {
-      return localStorage.getItem("gs_api_key") || "";
-    }
-  } catch {}
-  return "";
-}
-function setApiKey(v: string) {
-  try {
-    if (typeof window !== "undefined") {
-      localStorage.setItem("gs_api_key", v || "");
-    }
-  } catch {}
-}
-
-/** Drive/URL helpers */
-function extractDriveId(u: string) {
-  try {
-    const m1 = u.match(/\/file\/d\/([^/]+)/);
-    if (m1) return m1[1];
-    const m2 = u.match(/[?&]id=([^&]+)/);
-    if (m2) return m2[1];
-  } catch {}
+    const m1 = u.match(/\/file\/d\/([^/]+)/); if (m1) return m1[1];
+    const m2 = u.match(/[?&]id=([^&]+)/);      if (m2) return m2[1];
+  } catch { /* no‑op */ }
   return null;
 }
+
+// Нормализуем ссылки: прямые URL оставляем как есть,
+// Google Drive вида /file/d/.. или ?id=.. превращаем в прямой CDN превью.
 function normalizeImageUrl(u: string): string {
-  if (!u) return u;
-  const id = extractDriveId(u);
-  if (id) return `https://drive.google.com/uc?export=view&id=${id}`;
   try {
     const url = new URL(u);
-    if (/\.(png|jpe?g|webp|gif|svg)(\?.*)?$/i.test(url.pathname)) return u;
-  } catch {}
-  return u;
-}
-
-/** Толерантный разбор листа __tabs */
-function rowsToTabs(rows: SheetRow[]): { tabs: Tab[]; mapping: Record<string, string> } {
-  const out: Tab[] = [];
-  const map: Record<string, string> = {};
-
-  for (const r of rows) {
-    const keyMap: Record<string, string> = {};
-    for (const k of Object.keys(r)) keyMap[k.toLowerCase().trim()] = k;
-
-    const sheetKey =
-      keyMap["sheet"] ??
-      keyMap["лист"] ??
-      keyMap["tab"] ??
-      keyMap["sheet_name"] ??
-      keyMap["sheetname"] ??
-      keyMap["страница"] ??
-      null;
-
-    const labelKey =
-      keyMap["label"] ??
-      keyMap["вкладка"] ??
-      keyMap["название"] ??
-      keyMap["name"] ??
-      keyMap["title"] ??
-      null;
-
-    let sheet = sheetKey ? String(r[sheetKey]).trim() : "";
-    let label = labelKey ? String(r[labelKey]).trim() : "";
-
-    // Фолбек: берем первые две непустые колонки как sheet/label
-    if (!sheet || !label) {
-      const values = Object.values(r).map((v) => String(v || "").trim()).filter(Boolean);
-      if (!sheet && values[0]) sheet = values[0];
-      if (!label && values[1]) label = values[1] || sheet;
+    if (url.hostname.includes("drive.google.com")) {
+      // извлечь id из /file/d/<id>/... или из ?id=<id>
+      const byPath = url.pathname.split("/d/")[1]?.split("/")[0];
+      const byQuery = url.searchParams.get("id");
+      const id = byPath || byQuery || "";
+      // максимально «крупный» превью CDN Google
+      return id ? `https://lh3.googleusercontent.com/d/${id}=s2048` : u;
     }
-
-    if (!sheet) continue;
-    if (!label) label = sheet;
-
-    const id = label; // id вкладки = её label (удобно для кнопок)
-    out.push({ id, label });
-    map[id] = sheet;
+    return u;
+  } catch {
+    return u;
   }
-
-  return { tabs: out, mapping: map };
 }
 
-/** Преобразование строк GViz в структуру матрицы */
 function rowsToMatrix(rows: SheetRow[]): MatrixData {
   const allKeys = new Set<string>();
   rows.forEach((r) => Object.keys(r).forEach((k) => allKeys.add(k)));
-
-  // course ids по суффиксу "_text"
   const courseIds = Array.from(allKeys)
     .filter((k) => k.endsWith("_text"))
     .map((k) => k.slice(0, -"_text".length))
@@ -222,105 +101,81 @@ function rowsToMatrix(rows: SheetRow[]): MatrixData {
       const nb = parseInt(b.replace(/\D+/g, "")) || 0;
       return na - nb || a.localeCompare(b);
     });
-
-  const courses: Course[] = courseIds.map((cid, i) => ({
-    id: cid,
-    name: `Курс ${i + 1}`,
-  }));
+  const courses: Course[] = courseIds.map((cid, i) => ({ id: cid, name: `Курс ${i + 1}` }));
 
   const criteria: Criterion[] = [];
   const cells: Cell[] = [];
-
   rows.forEach((r, idx) => {
     const group = String(r.section || "").trim();
     const name = String(r.criterion || "").trim();
-    const description = String(r.description || "").trim();
-    const filledBy = String((r as any).filled_by || (r as any).filledBy || "").trim();
-    const criterionId = String((r as any).criterion_id || (r as any).criterionId || "").trim();
-
-    if (!criterionId && !name && !group && !description) return;
-
-    const id = criterionId || `row_${idx}`;
-    criteria.push({
-      id,
-      name: name || `Критерий ${idx + 1}`,
-      description,
-      filledBy,
-      group: group || MISC_GROUP,
-    });
+    const description = String(r.description || "").trim() || undefined;
+    const filledBy = String(r.filled_by || "").trim() || undefined;
+    let id = String(r.criterion_id || "").trim();
+    if (!name) return;
+    const isCourseRow = group === COURSE_GROUP && name === "Курс";
+    if (isCourseRow) id = COURSE_CRIT_ID; else if (!id) id = `gen-${idx + 1}`;
+    criteria.push({ id, name, group: isCourseRow ? COURSE_GROUP : (group || undefined), description, filledBy });
 
     courseIds.forEach((cid) => {
-      const text = String((r as any)[`${cid}_text`] || "").trim();
-      const imagesRaw = String((r as any)[`${cid}_images`] || "").trim();
-      const images: Img[] = imagesRaw
-        ? imagesRaw
-            .split(/\r?\n/)
-            .map((s) => s.trim())
-            .filter(Boolean)
-            .map((url) => ({ url: normalizeImageUrl(url) }))
-        : [];
-      cells.push({ courseId: cid, criterionId: id, text, images });
+      const text = String((r as any)[`${cid}_text`] || "");
+      const imagesRaw = String((r as any)[`${cid}_images`] || "");
+      const images = imagesRaw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean).map((url) => ({ url: normalizeImageUrl(url) }));
+      if (text || images.length) cells.push({ courseId: cid, criterionId: id, text: text || undefined, images });
     });
   });
-
-  // «Курс» как несворачиваемая «квази-строка»
-  if (!criteria.find((c) => c.id === COURSE_CRIT_ID)) {
-    criteria.unshift({ id: COURSE_CRIT_ID, name: "Курс", group: COURSE_GROUP });
-  }
-
   return { criteria, courses, cells };
 }
 
-/** ===== Вьюшные помощники ===== */
-function Img({ url, alt, className }: { url: string; alt?: string; className?: string }) {
-  return <img src={normalizeImageUrl(url)} alt={alt || "image"} className={className} />;
+function rowsToTabs(rows: SheetRow[]): { tabs: Tab[]; mapping: Record<string, string> } {
+  const out: Tab[] = [];
+  const map: Record<string, string> = {};
+  for (const r of rows) {
+    const sheet = String(r.sheet || "").trim();
+    const label = String(r.label || sheet || "").trim();
+    if (!sheet || !label) continue;
+    const id = String((r as any).id || sheet);
+    out.push({ id, label });
+    map[id] = sheet;
+  }
+  return { tabs: out, mapping: map };
 }
 
 function CriterionHeader({ k }: { k: Criterion }) {
   return (
-    <div className="font-medium border-b px-2 py-2">
-      <div className="text-sm">{k.name}</div>
-      {k.description ? (
-        <div className="text-xs text-muted-foreground whitespace-pre-wrap">{k.description}</div>
-      ) : null}
-      {k.filledBy ? (
-        <div className="text-[11px] text-muted-foreground mt-1">Кто заполняет: {k.filledBy}</div>
-      ) : null}
+    <div className="border-r px-2 py-3 text-sm">
+      <div className="font-medium">{k.name}</div>
+      {k.description && <div className="text-muted-foreground text-xs whitespace-pre-line">{k.description}</div>}
+      {k.filledBy && <div className="text-xs italic">Заполняет: {k.filledBy}</div>}
     </div>
   );
 }
 
-function CellCardView({
-  cell,
-  onOpen,
-  onEdit,
-}: {
-  cell: Cell | undefined;
-  onOpen: () => void;
-  onEdit: () => void;
-}) {
-  const imgs = cell?.images || [];
+function Img({ url, alt, className }: { url: string; alt?: string; className?: string }) {
+  const [ok, setOk] = React.useState(true);
+  const src = normalizeImageUrl(url);
+  return ok ? (
+    <img src={src} alt={alt || "image"} className={className || "max-w-full max-h-64 rounded border"} loading="lazy" decoding="async" onError={() => setOk(false)} />
+  ) : (
+    <a href={url} target="_blank" rel="noreferrer" className="inline-flex items-center justify-center rounded border px-2 py-1 text-[11px] leading-4 bg-red-50 text-red-700 hover:bg-red-100">⚠︎ Открыть оригинал</a>
+  );
+}
+
+function CellCardView({ cell, onOpen, onEdit }: { cell?: Cell; onOpen: () => void; onEdit: () => void }) {
   return (
-    <div className="px-2 py-2 border-b">
-      <Card className="shadow-none">
-        <CardContent className="p-3">
-          <div className="text-sm whitespace-pre-wrap">
-            {cell?.text?.trim() || <span className="text-muted-foreground">—</span>}
-          </div>
-          {imgs.length > 0 && (
-            <div className="flex gap-2 mt-2 flex-wrap">
-              {imgs.map((img, i) => (
+    <div className="p-2 border">
+      <Card>
+        <CardContent className="p-2 text-sm">
+          {cell?.text ? <div className="mb-2 line-clamp-3">{cell.text}</div> : <span className="text-muted-foreground">Нет данных</span>}
+          {cell?.images && cell.images.length > 0 && (
+            <div className="flex flex-wrap gap-1 mt-2">
+              {cell.images.map((img, i) => (
                 <Img key={i} url={img.url} alt={img.caption || "preview"} className="h-12 w-12 object-cover rounded" />
               ))}
             </div>
           )}
           <div className="flex gap-2 mt-2">
-            <Button size="sm" variant="outline" onClick={onOpen}>
-              <Maximize2 className="h-4 w-4" />
-            </Button>
-            <Button size="sm" variant="secondary" onClick={onEdit}>
-              <Edit3 className="h-4 w-4" />
-            </Button>
+            <Button size="sm" variant="outline" onClick={onOpen}><Maximize2 className="h-4 w-4" /></Button>
+            <Button size="sm" variant="secondary" onClick={onEdit}><Edit3 className="h-4 w-4" /></Button>
           </div>
         </CardContent>
       </Card>
@@ -339,51 +194,28 @@ function CourseHeaderCell({ cLabel, onHide }: { cLabel: string; onHide: () => vo
   );
 }
 
-/** ===== Компонент ===== */
 export default function CompetitorMatrix() {
-  /** вкладки */
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [tabToSheet, setTabToSheet] = useState<Record<string, string>>({});
   const [activeTab, setActiveTab] = useState<string>("");
 
-  /** матрица */
   const [data, setData] = useState<MatrixData>({ criteria: [], courses: [], cells: [] });
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState<boolean>(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  /** просмотр/редактирование ячейки */
   const [open, setOpen] = useState<{ courseId: string; criterionId: string } | null>(null);
   const [edit, setEdit] = useState<{ courseId: string; criterionId: string } | null>(null);
   const [draftText, setDraftText] = useState("");
-  const [draftImages, setDraftImages] = useState("");
-
-  /** добавление критерия */
-  const [addCriterionOpen, setAddCriterionOpen] = useState(false);
-  const [newCriterion, setNewCriterion] = useState<{ name: string; description: string; filledBy: string }>({
-    name: "",
-    description: "",
-    filledBy: "",
-  });
-
-  /** скрытие курсов */
-  const [hiddenCourses, setHiddenCourses] = useState<string[]>(() => {
-    try {
-      if (typeof window !== "undefined") {
-        return JSON.parse(localStorage.getItem("hiddenCourseIds") || "[]") || [];
-      }
-    } catch {}
-    return [];
-  });
-
-  const visibleCourses = useMemo(
-    () => data.courses.filter((c) => !hiddenCourses.includes(c.id)),
-    [data.courses, hiddenCourses]
-  );
-
+  const [draftImages, setDraftImages] = useState<string>("");
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+  const [addCriterionOpen, setAddCriterionOpen] = useState(false);
+  const [newCriterion, setNewCriterion] = useState({ name: "", description: "", filledBy: "" });
+  const [hiddenCourses, setHiddenCourses] = useState<string[]>([]);
   const [viewerIndex, setViewerIndex] = useState(0);
 
-  /** загрузка вкладок */
+  const storageKey = (base: string) => `${base}:${activeTab || "__na__"}`;
+
+  // === Загрузка вкладок ===
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -391,86 +223,59 @@ export default function CompetitorMatrix() {
         const rows = await fetchGViz(TABS_INDEX_SHEET);
         if (cancelled) return;
         const { tabs: t, mapping } = rowsToTabs(rows);
-        if (t.length === 0) throw new Error("Нет вкладок (__tabs) — проверь лист и его доступность");
+        if (t.length === 0) throw new Error("Лист __tabs пустой");
         setTabs(t);
         setTabToSheet(mapping);
-        setActiveTab((prev) => (prev && mapping[prev] ? prev : t[0].id));
+        if (!activeTab) setActiveTab(t[0].id);
       } catch (e: any) {
         setLoadError(e?.message || String(e));
       }
     })();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, []);
 
-  /** загрузка данных активной вкладки */
+  // === Загрузка данных активной вкладки ===
   useEffect(() => {
     if (!activeTab) return;
     let cancelled = false;
     (async () => {
-      setLoading(true);
-      setLoadError(null);
+      setLoading(true); setLoadError(null);
       try {
-        const sheet = tabToSheet[activeTab];
-        if (!sheet) throw new Error("Лист не найден для вкладки");
-        const rows = await fetchGViz(sheet);
+        const sheetName = tabToSheet[activeTab];
+        if (!sheetName) throw new Error(`Для вкладки ${activeTab} не найден лист в __tabs`);
+        const rows = await fetchGViz(sheetName);
         if (cancelled) return;
-        const matrix = rowsToMatrix(rows);
-        setData(matrix);
-
-        // раскрыть все группы по умолчанию
-        const nextGroups: Record<string, boolean> = {};
-        matrix.criteria.forEach((c) => {
-          const g = c.group && c.group !== "XI. Прочее" ? c.group : MISC_GROUP;
-          nextGroups[g] = false;
-        });
-        setCollapsedGroups(nextGroups);
+        setData(rowsToMatrix(rows));
+        const savedHidden = localStorage.getItem(storageKey("hiddenCourseIds"));
+        setHiddenCourses(savedHidden ? JSON.parse(savedHidden) : []);
+        setCollapsedGroups({}); setOpen(null); setEdit(null);
       } catch (e: any) {
-        setLoadError(e?.message || String(e));
+        if (!cancelled) setLoadError(e?.message || String(e));
       } finally {
         if (!cancelled) setLoading(false);
       }
     })();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [activeTab, tabToSheet]);
 
-  /** геттер ячейки */
-  const getCell = (courseId: string, criterionId: string): Cell | undefined =>
-    data.cells.find((x) => x.courseId === courseId && x.criterionId === criterionId);
+  // Сброс индекса просмотрщика при смене ячейки
+  useEffect(() => { setViewerIndex(0); }, [open?.courseId, open?.criterionId]);
 
-  /** сохранить ячейку в Таблицу */
-  async function saveCell(courseId: string, criterionId: string) {
-    const imagesLines = draftImages || "";
-    const text = draftText || "";
+  // === Индексы/геттеры ===
+  const cellIndex = useMemo(() => {
+    const byCourse: Record<string, Record<string, Cell>> = {};
+    for (const cell of data.cells) {
+      if (!byCourse[cell.courseId]) byCourse[cell.courseId] = {};
+      byCourse[cell.courseId][cell.criterionId] = cell;
+    }
+    return byCourse;
+  }, [data.cells]);
+  const getCell = (courseId: string, criterionId: string): Cell | undefined => (cellIndex as any)[courseId]?.[criterionId];
+
+  // === Запись ячейки ===
+  async function writeCell(courseId: string, criterionId: string, text: string, imagesLines: string) {
     const sheetName = tabToSheet[activeTab];
     const crit = data.criteria.find((c) => c.id === criterionId);
-
-    // локально
-    setData((prev) => {
-      const next = { ...prev, cells: [...prev.cells] };
-      const idx = next.cells.findIndex((c) => c.courseId === courseId && c.criterionId === criterionId);
-      const cell: Cell = {
-        courseId,
-        criterionId,
-        text,
-        images: imagesLines
-          .split(/\r?\n/)
-          .map((s) => s.trim())
-          .filter(Boolean)
-          .map((url) => ({ url: normalizeImageUrl(url) })),
-      };
-      if (idx >= 0) next.cells[idx] = cell;
-      else next.cells.push(cell);
-      return next;
-    });
-
-    // сброс модалки
-    setEdit(null);
-
-    if (!APPS_SCRIPT_URL) return;
     const payload = {
       action: "upsertCell",
       apiKey: getApiKey(),
@@ -480,31 +285,20 @@ export default function CompetitorMatrix() {
       criterion: crit?.name || "",
       text,
       images: imagesLines.split(/\r?\n/).map((s) => s.trim()).filter(Boolean),
-      updatedBy:
-        (typeof window !== "undefined" && (localStorage.getItem("user_name") || "anonymous")) || "anonymous",
+      updatedBy: (typeof window !== "undefined" && (localStorage.getItem("user_name") || "anonymous")) || "anonymous",
     } as const;
 
+    if (!APPS_SCRIPT_URL) return;
     try {
-      let res = await fetch(APPS_SCRIPT_URL, {
-        method: "POST",
-        headers: { "Content-Type": "text/plain" }, // ВАЖНО: только text/plain
-        body: JSON.stringify(payload),
-      });
+      let res = await fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify(payload) });
       const raw = await res.text();
-      let json: any = null;
-      try {
-        json = JSON.parse(raw);
-      } catch {}
+      let json: any = null; try { json = JSON.parse(raw); } catch { /* not JSON */ }
       const unauthorized = !!(json && typeof json.error === "string" && json.error.toUpperCase().includes("UNAUTHORIZED"));
       if (unauthorized) {
         const key = typeof window !== "undefined" ? window.prompt("Введите API_KEY для записи в таблицу", "") : null;
         if (key) {
           setApiKey(key);
-          await fetch(APPS_SCRIPT_URL, {
-            method: "POST",
-            headers: { "Content-Type": "text/plain" },
-            body: JSON.stringify({ ...payload, apiKey: key }),
-          });
+          await fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ ...payload, apiKey: key }) });
         }
       }
     } catch (e) {
@@ -512,20 +306,50 @@ export default function CompetitorMatrix() {
     }
   }
 
-  /** скрыть курс */
-  function hideCourse(id: string) {
-    setHiddenCourses((prev) => {
-      const next = [...prev, id];
-      try {
-        if (typeof window !== "undefined") {
-          localStorage.setItem("hiddenCourseIds", JSON.stringify(next));
-        }
-      } catch {}
-      return next;
+  const saveCell = async (courseId: string, criterionId: string) => {
+    const images = draftImages.split(/\r?\n/).map((u) => u.trim()).filter(Boolean).map((u) => ({ url: normalizeImageUrl(u) }));
+    const newCell: Cell = { courseId, criterionId, text: draftText, images };
+    setData((prev) => {
+      const filtered = prev.cells.filter((c) => !(c.courseId === courseId && c.criterionId === criterionId));
+      return { ...prev, cells: [...filtered, newCell] };
     });
+    await writeCell(courseId, criterionId, draftText, draftImages);
+    setEdit(null);
+  };
+
+  async function addCourse() {
+    const nextIndex = data.courses.length + 1;
+    const newCourseId = `c${nextIndex}`;
+    if (APPS_SCRIPT_URL) {
+      try {
+        const res = await fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ action: "addCourse", apiKey: getApiKey(), tab: tabToSheet[activeTab], courseId: newCourseId }) });
+        if (!res.ok) throw new Error("Не удалось добавить курс в таблицу");
+      } catch (e) {
+        console.warn("Apps Script недоступен, добавление только локально", e);
+      }
+    }
+    setData((prev) => ({ ...prev, courses: [...prev.courses, { id: newCourseId, name: `Курс ${nextIndex}` }] }));
   }
 
-  /** сгруппированные критерии */
+  function addCriterionLocal() {
+    if (!newCriterion.name.trim()) return;
+    const id = `cr-${Date.now()}`;
+    const newC: Criterion = { id, name: newCriterion.name, description: newCriterion.description, group: MISC_GROUP, filledBy: newCriterion.filledBy };
+    setData((prev) => ({ ...prev, criteria: [...prev.criteria, newC] }));
+    setNewCriterion({ name: "", description: "", filledBy: "" });
+    setAddCriterionOpen(false);
+    if (APPS_SCRIPT_URL) {
+      fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ action: "addCriterion", apiKey: getApiKey(), tab: tabToSheet[activeTab], criterion: newC }) }).catch(() => console.warn("Не удалось записать критерий в таблицу"));
+    }
+  }
+
+  const toggleGroup = (group: string) => setCollapsedGroups((prev) => ({ ...prev, [group]: !prev[group] }));
+
+  const visibleCourses = useMemo(() => data.courses.filter((c) => !hiddenCourses.includes(c.id)), [data.courses, hiddenCourses]);
+  const hiddenCourseObjs = useMemo(() => data.courses.filter((c) => hiddenCourses.includes(c.id)), [data.courses, hiddenCourses]);
+
+  const courseMetaCriteria = useMemo(() => data.criteria.filter((c) => c.id === COURSE_CRIT_ID || c.group === COURSE_GROUP), [data.criteria]);
+
   const groupedCriteria = useMemo(() => {
     const groups: Record<string, Criterion[]> = {};
     for (const c of data.criteria) {
@@ -538,100 +362,15 @@ export default function CompetitorMatrix() {
     return groups;
   }, [data.criteria]);
 
-  function toggleGroup(g: string) {
-    setCollapsedGroups((prev) => ({ ...prev, [g]: !prev[g] }));
-  }
-
-  /** добавление критерия — исправленная версия */
-  async function addCriterionLocal() {
-    const name = newCriterion.name.trim();
-    if (!name) return;
-
-    const id = `cr-${Date.now()}`;
-    const description = newCriterion.description.trim();
-    const filledBy = newCriterion.filledBy.trim();
-
-    // локально добавим критерий в «Прочие критерии»
-    const newC: Criterion = { id, name, description, filledBy, group: MISC_GROUP };
-    setData((prev) => ({ ...prev, criteria: [...prev.criteria, newC] }));
-
-    // сброс формы
-    setNewCriterion({ name: "", description: "", filledBy: "" });
-    setAddCriterionOpen(false);
-
-    if (!APPS_SCRIPT_URL) return;
-    const sheetName = tabToSheet[activeTab];
-
-    // 1) метаданные критерия
-    try {
-      await fetch(APPS_SCRIPT_URL, {
-        method: "POST",
-        headers: { "Content-Type": "text/plain" },
-        body: JSON.stringify({
-          action: "upsertCriterion",
-          apiKey: getApiKey(),
-          tab: sheetName,
-          criterionId: id,
-          section: "Прочие критерии",
-          criterion: name,
-          description,
-          filled_by: filledBy,
-        }),
-      });
-    } catch (e) {
-      console.warn("Не удалось записать метаданные критерия", e);
-    }
-
-    // 2) пропраймить пустые ячейки под все курсы — чтобы строка сразу появилась
-    try {
-      await Promise.all(
-        (data.courses || []).map((c) =>
-          fetch(APPS_SCRIPT_URL, {
-            method: "POST",
-            headers: { "Content-Type": "text/plain" },
-            body: JSON.stringify({
-              action: "upsertCell",
-              apiKey: getApiKey(),
-              tab: sheetName,
-              courseId: c.id,
-              criterionId: id,
-              text: "",
-              images: [],
-            }),
-          })
-        )
-      );
-    } catch (e) {
-      console.warn("Не удалось создать пустые ячейки для нового критерия", e);
-    }
-  }
-
-  /** ===== Рендер ===== */
-  if (loadError) {
-    return <div className="p-4 text-sm text-red-600">Ошибка загрузки: {String(loadError)}</div>;
-  }
-  if (loading && !data.criteria.length) {
-    return <div className="p-4 text-sm text-muted-foreground">Загрузка…</div>;
-  }
-
   return (
     <div className="w-full h-full p-4">
       {/* Вкладки */}
       <div className="flex gap-2 overflow-x-auto pb-3 -mt-1">
         {tabs.length === 0 ? (
-          <span className="text-xs text-muted-foreground">
-            Нет вкладок. Создайте лист <code>__tabs</code> со столбцами <code>sheet</code> и{" "}
-            <code>label</code> (регистр не важен; можно «лист/вкладка»). Первая строка — заголовки.
-          </span>
+          <span className="text-xs text-muted-foreground">Нет вкладок. Создайте лист <code>__tabs</code> с колонками <code>sheet</code>, <code>label</code>.</span>
         ) : (
           tabs.map((t) => (
-            <Button
-              key={t.id}
-              size="sm"
-              variant={activeTab === t.id ? "default" : "outline"}
-              onClick={() => setActiveTab(t.id)}
-              className="whitespace-nowrap"
-            >
+            <Button key={t.id} size="sm" variant={activeTab === t.id ? "secondary" : "outline"} onClick={() => setActiveTab(t.id)} className="whitespace-nowrap">
               {t.label}
             </Button>
           ))
@@ -640,102 +379,123 @@ export default function CompetitorMatrix() {
 
       {/* Кнопки действий */}
       <div className="flex justify-between items-center mb-4">
-        <h1 className="text-lg font-bold">
-          Матрица анализа конкурентов —{" "}
-          <span className="font-normal">{tabs.find((t) => t.id === activeTab)?.label || "—"}</span>
-        </h1>
+        <h1 className="text-lg font-bold">Матрица анализа конкурентов — <span className="font-normal">{tabs.find(t => t.id === activeTab)?.label || "—"}</span></h1>
         <div className="flex gap-2 items-center">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() =>
-              setCollapsedGroups((prev) => {
-                const allClosed = Object.values(prev).every((v) => v === true);
-                const next: Record<string, boolean> = {};
-                Object.keys(prev).forEach((g) => (next[g] = !allClosed));
-                return next;
-              })
-            }
-            disabled={!activeTab}
-          >
-            Сменить разворот групп
-          </Button>
-
-          <Button variant="default" size="sm" onClick={() => setAddCriterionOpen(true)}>
-            <Plus className="h-4 w-4 mr-1" /> Добавить критерий
-          </Button>
+          <Button variant="default" size="sm" onClick={addCourse} disabled={!activeTab}><Plus className="h-4 w-4 mr-1" /> Добавить курс</Button>
+          <Button variant="outline" size="sm" onClick={() => Object.keys(groupedCriteria).forEach((g) => setCollapsedGroups((prev) => ({ ...prev, [g]: false })))} disabled={!activeTab}>Развернуть все</Button>
+          <Button variant="outline" size="sm" onClick={() => Object.keys(groupedCriteria).forEach((g) => setCollapsedGroups((prev) => ({ ...prev, [g]: true })))} disabled={!activeTab}>Свернуть все</Button>
         </div>
       </div>
 
-      {/* Таблица */}
-      <div
-        className="grid"
-        style={{
-          gridTemplateColumns: `minmax(220px, 1fr) repeat(${visibleCourses.length}, minmax(240px, 1fr))`,
-          gap: "0px",
-        }}
-      >
-        {/* Заголовки курсов */}
-        <div className="px-2 py-2 border-b font-semibold">Критерий</div>
-        {visibleCourses.map((c, i) => (
-          <CourseHeaderCell key={c.id} cLabel={`Курс ${i + 1}`} onHide={() => hideCourse(c.id)} />
-        ))}
+      {loading ? (
+        <div className="text-sm text-muted-foreground">Загружаю данные…</div>
+      ) : loadError ? (
+        <div className="text-sm text-red-600">Ошибка загрузки: {loadError}</div>
+      ) : !activeTab ? (
+        <div className="text-sm text-muted-foreground">Выберите вкладку (или заполните лист <code>__tabs</code>).</div>
+      ) : (
+        <div className="flex gap-4 items-start">
+          {/* Табличная сетка */}
+          <div className="grid flex-1" style={{ gridTemplateColumns: `280px repeat(${visibleCourses.length}, minmax(260px, 1fr))` }}>
+            <div className="font-medium border-b px-2 py-2">Критерии / Курсы</div>
+            {visibleCourses.map((c, idx) => (
+              <CourseHeaderCell key={c.id} cLabel={`Курс ${idx + 1}`} onHide={() => {
+                setHiddenCourses((prev) => { const next = [...prev, c.id]; localStorage.setItem(storageKey("hiddenCourseIds"), JSON.stringify(next)); return next; });
+              }} />
+            ))}
 
-        {/* Группы и строки */}
-        {Object.entries(groupedCriteria).map(([group, criteria]) => (
-          <React.Fragment key={group}>
-            <div className="col-span-full flex items-center bg-gray-100 px-2 py-2 border-t">
-              <div className="flex items-center gap-1 flex-1 cursor-pointer" onClick={() => toggleGroup(group)}>
-                {collapsedGroups[group] ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-                <span className="font-semibold text-sm">{group}</span>
+            {/* Несворачиваемый блок: 0. Курс */}
+            {courseMetaCriteria.map((k) => (
+              <React.Fragment key={k.id}>
+                <CriterionHeader k={k} />
+                {visibleCourses.map((c) => {
+                  const cell = getCell(c.id, k.id);
+                  return (
+                    <CellCardView
+                      key={c.id + k.id}
+                      cell={cell}
+                      onOpen={() => setOpen({ courseId: c.id, criterionId: k.id })}
+                      onEdit={() => { setEdit({ courseId: c.id, criterionId: k.id }); setDraftText(cell?.text || ""); setDraftImages((cell?.images || []).map((i) => i.url).join("\n")); }}
+                    />
+                  );
+                })}
+              </React.Fragment>
+            ))}
+
+            {/* Остальные группы */}
+            {Object.entries(groupedCriteria).map(([group, criteria]) => (
+              <React.Fragment key={group}>
+                <div className="col-span-full flex items-center bg-gray-100 px-2 py-2 border-t">
+                  <div className="flex items-center gap-1 flex-1 cursor-pointer" onClick={() => toggleGroup(group)}>
+                    {collapsedGroups[group] ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                    <span className="font-semibold text-sm">{group}</span>
+                  </div>
+                  {group === MISC_GROUP && (
+                    <Button size="sm" variant="outline" onClick={() => setAddCriterionOpen(true)}>
+                      <Plus className="h-4 w-4 mr-1" /> Добавить критерий
+                    </Button>
+                  )}
+                </div>
+
+                {!collapsedGroups[group] && criteria.map((k) => (
+                  <React.Fragment key={k.id}>
+                    <CriterionHeader k={k} />
+                    {visibleCourses.map((c) => {
+                      const cell = getCell(c.id, k.id);
+                      return (
+                        <CellCardView
+                          key={c.id + k.id}
+                          cell={cell}
+                          onOpen={() => setOpen({ courseId: c.id, criterionId: k.id })}
+                          onEdit={() => { setEdit({ courseId: c.id, criterionId: k.id }); setDraftText(cell?.text || ""); setDraftImages((cell?.images || []).map((i) => i.url).join("\n")); }}
+                        />
+                      );
+                    })}
+                  </React.Fragment>
+                ))}
+              </React.Fragment>
+            ))}
+          </div>
+
+          {/* Сайдбар: скрытые курсы */}
+          <div className="w-[220px] shrink-0 border rounded-md p-2">
+            <div className="font-medium mb-2">Скрытые курсы</div>
+            {hiddenCourseObjs.length > 0 ? (
+              <div className="flex flex-col gap-2">
+                {hiddenCourseObjs.map((c) => {
+                  const meta = getCell(c.id, COURSE_CRIT_ID)?.text?.trim();
+                  const number = data.courses.findIndex((x) => x.id === c.id) + 1;
+                  const label = meta && meta.length > 0 ? meta : `Курс ${number}`;
+                  return (
+                    <Button key={c.id} size="sm" variant="secondary" onClick={() => {
+                      setHiddenCourses((prev) => { const next = prev.filter((x) => x !== c.id); localStorage.setItem(storageKey("hiddenCourseIds"), JSON.stringify(next)); return next; });
+                    }} className="justify-start text-left whitespace-pre-wrap">
+                      {label}
+                    </Button>
+                  );
+                })}
               </div>
-              {group === MISC_GROUP && (
-                <Button size="sm" variant="outline" onClick={() => setAddCriterionOpen(true)}>
-                  <Plus className="h-4 w-4 mr-1" /> Добавить критерий
-                </Button>
-              )}
-            </div>
+            ) : (
+              <div className="text-xs text-muted-foreground">Нет скрытых</div>
+            )}
+          </div>
+        </div>
+      )}
 
-            {!collapsedGroups[group] &&
-              criteria.map((k) => (
-                <React.Fragment key={k.id}>
-                  <CriterionHeader k={k} />
-                  {visibleCourses.map((c) => {
-                    const cell = getCell(c.id, k.id);
-                    return (
-                      <CellCardView
-                        key={c.id + k.id}
-                        cell={cell}
-                        onOpen={() => setOpen({ courseId: c.id, criterionId: k.id })}
-                        onEdit={() => {
-                          setEdit({ courseId: c.id, criterionId: k.id });
-                          setDraftText(cell?.text || "");
-                          setDraftImages((cell?.images || []).map((i) => i.url).join("\n"));
-                        }}
-                      />
-                    );
-                  })}
-                </React.Fragment>
-              ))}
-          </React.Fragment>
-        ))}
-      </div>
-
-      {/* Просмотр ячейки */}
-      <Dialog open={!!open} onOpenChange={(v) => !v && setOpen(null)}>
+      {/* Просмотр */}
+      <Dialog open={!!open} onOpenChange={() => setOpen(null)}>
         <DialogContent className="sm:max-w-5xl w-[min(96vw,1200px)] max-h-[85vh] overflow-auto p-4">
           {open && (
             <>
               <DialogHeader>
                 <DialogTitle>
-                  Просмотр:{" "}
-                  {getCell(open.courseId, COURSE_CRIT_ID)?.text?.trim() ||
-                    `Курс ${Math.max(1, data.courses.findIndex((x) => x.id === open.courseId) + 1)}`}
+                  Просмотр: {(
+                    getCell(open.courseId, COURSE_CRIT_ID)?.text?.trim() ||
+                    `Курс ${Math.max(1, data.courses.findIndex(x => x.id === open.courseId) + 1)}`
+                  )}
                 </DialogTitle>
               </DialogHeader>
-              <div className="text-sm whitespace-pre-wrap mb-4">
-                {getCell(open.courseId, open.criterionId)?.text || "—"}
-              </div>
+              <div className="text-sm whitespace-pre-wrap mb-4">{getCell(open.courseId, open.criterionId)?.text || "—"}</div>
               {(() => {
                 const cell = getCell(open.courseId, open.criterionId);
                 const imgs = cell?.images || [];
@@ -745,11 +505,7 @@ export default function CompetitorMatrix() {
                 return (
                   <div className="flex flex-col gap-3 items-center">
                     <div className="w-full flex items-center justify-center">
-                      <Img
-                        url={current.url}
-                        alt={current.caption || "image"}
-                        className="max-h-[78vh] w-full object-contain rounded border bg-black/5"
-                      />
+                      <Img url={current.url} alt={current.caption || "screenshot"} className="max-h-[78vh] w-full object-contain rounded border bg-black/5" />
                     </div>
                     <div className="w-full flex items-center gap-3">
                       <Button
@@ -758,27 +514,31 @@ export default function CompetitorMatrix() {
                         variant="outline"
                         onClick={() => setViewerIndex((i) => Math.max(0, i - 1))}
                         disabled={clampedIndex <= 0}
-                        title="Назад"
+                        aria-label="Предыдущее изображение"
                       >
                         <ChevronLeft className="h-4 w-4" />
                       </Button>
-                      <div className="text-xs">
-                        {clampedIndex + 1} / {imgs.length}
-                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={Math.max(0, imgs.length - 1)}
+                        value={clampedIndex}
+                        onChange={(e) => setViewerIndex(Number(e.target.value))}
+                        className="flex-1"
+                      />
                       <Button
                         type="button"
                         size="icon"
                         variant="outline"
                         onClick={() => setViewerIndex((i) => Math.min(imgs.length - 1, i + 1))}
                         disabled={clampedIndex >= imgs.length - 1}
-                        title="Вперёд"
+                        aria-label="Следующее изображение"
                       >
                         <ChevronRight className="h-4 w-4" />
                       </Button>
-                      <a className="ml-auto underline text-xs" href={current.url} target="_blank" rel="noreferrer">
-                        Открыть оригинал
-                      </a>
+                      <span className="text-xs whitespace-nowrap">{clampedIndex + 1} / {imgs.length}</span>
                     </div>
+                    <a href={current.url} target="_blank" rel="noreferrer" className="text-xs underline text-blue-600 hover:text-blue-800 self-start">Открыть оригинал</a>
                   </div>
                 );
               })()}
@@ -787,41 +547,26 @@ export default function CompetitorMatrix() {
         </DialogContent>
       </Dialog>
 
-      {/* Редактирование ячейки */}
-      <Dialog open={!!edit} onOpenChange={(v) => !v && setEdit(null)}>
-        <DialogContent className="sm:max-w-4xl">
+      {/* Редактирование */}
+      <Dialog open={!!edit} onOpenChange={() => setEdit(null)}>
+        <DialogContent className="max-w-xl">
           {edit && (
             <>
               <DialogHeader>
-                <DialogTitle>Редактирование</DialogTitle>
+                <DialogTitle>Редактировать: {edit.courseId} / {edit.criterionId}</DialogTitle>
               </DialogHeader>
               <div className="flex flex-col gap-3">
+                <Label>Текст</Label>
+                <textarea value={draftText} onChange={(e) => setDraftText(e.target.value)} className="border rounded-md p-2 text-sm min-h-[120px]" />
                 <div>
-                  <Label>Текст</Label>
-                  <textarea
-                    value={draftText}
-                    onChange={(e) => setDraftText(e.target.value)}
-                    className="border rounded-md p-2 text-sm min-h-[160px] w-full mt-1 resize-y"
-                  />
+                  <Label className="block">Скриншоты (ссылки, по одной в строке)</Label>
+                  <textarea value={draftImages} onChange={(e) => setDraftImages(e.target.value)} className="border rounded-md p-2 text-sm min-h-[140px] w-full mt-1 resize-y" />
                 </div>
-                <div>
-                  <Label>Ссылки на изображения (по одной в строке)</Label>
-                  <textarea
-                    value={draftImages}
-                    onChange={(e) => setDraftImages(e.target.value)}
-                    className="border rounded-md p-2 text-sm min-h-[140px] w-full mt-1 resize-y"
-                  />
-                  <div className="text-xs text-muted-foreground">
-                    Поддерживаются прямые ссылки (jpg/png/webp/…) и Google Drive в форматах{" "}
-                    <code>/file/d/FILE_ID</code>, <code>?id=FILE_ID</code>; конвертируются в <code>uc?export=view</code>.
-                  </div>
-                </div>
+                <div className="text-xs text-muted-foreground">Для Google Drive вставляйте ссылку вида <code>https://drive.google.com/file/d/FILE_ID/view</code> (включите доступ «У кого есть ссылка: Просмотр»). Также работают <code>uc?export=download</code> и <code>thumbnail?id=FILE_ID&sz=w2000</code>.</div>
               </div>
               <DialogFooter className="pt-2">
                 <Button onClick={() => saveCell(edit.courseId, edit.criterionId)}>Сохранить</Button>
-                <Button variant="outline" onClick={() => setEdit(null)}>
-                  Отмена
-                </Button>
+                <Button variant="outline" onClick={() => setEdit(null)}>Отмена</Button>
               </DialogFooter>
             </>
           )}
@@ -832,39 +577,18 @@ export default function CompetitorMatrix() {
       <Dialog open={addCriterionOpen} onOpenChange={setAddCriterionOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Добавить новый критерий</DialogTitle>
+            <DialogTitle>Пока добавить новый критерий можно только вручную. Для этого напишите Катерине Бу.</DialogTitle>
           </DialogHeader>
-          <div className="flex flex-col gap-3">
-            <div>
-              <Label>Название критерия</Label>
-              <input
-                value={newCriterion.name}
-                onChange={(e) => setNewCriterion((s) => ({ ...s, name: e.target.value }))}
-                className="border rounded-md p-2 text-sm w-full mt-1"
-                placeholder="например, Наличие практикума"
-              />
-            </div>
-            <div>
-              <Label>Описание</Label>
-              <input
-                value={newCriterion.description}
-                onChange={(e) => setNewCriterion((s) => ({ ...s, description: e.target.value }))}
-                className="border rounded-md p-2 text-sm w-full mt-1"
-                placeholder="как измеряем или что подразумевается"
-              />
-            </div>
-            <div>
-              <Label>Кто заполняет</Label>
-              <input
-                value={newCriterion.filledBy}
-                onChange={(e) => setNewCriterion((s) => ({ ...s, filledBy: e.target.value }))}
-                className="border rounded-md p-2 text-sm w-full mt-1"
-                placeholder="роль/отдел/ФИО"
-              />
-            </div>
-          </div>
+          //<div className="flex flex-col gap-3">
+            //<Label>Название критерия</Label>
+            //<input value={newCriterion.name} onChange={(e) => setNewCriterion({ ...newCriterion, name: e.target.value })} className="border rounded-md p-2 text-sm" />
+            //<Label>Описание</Label>
+            //<input value={newCriterion.description} onChange={(e) => setNewCriterion({ ...newCriterion, description: e.target.value })} className="border rounded-md p-2 text-sm" />
+            //<Label>Кто заполняет</Label>
+            //<input value={newCriterion.filledBy} onChange={(e) => setNewCriterion({ ...newCriterion, filledBy: e.target.value })} className="border rounded-md p-2 text-sm" />
+          //</div>
           <DialogFooter className="pt-2">
-            <Button onClick={addCriterionLocal}>Добавить</Button>
+            //<Button onClick={addCriterionLocal}>Добавить</Button>
             <Button variant="outline" onClick={() => setAddCriterionOpen(false)}>Отмена</Button>
           </DialogFooter>
         </DialogContent>
