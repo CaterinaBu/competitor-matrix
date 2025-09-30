@@ -14,7 +14,7 @@ import { Maximize2, Edit3, ChevronDown, ChevronRight, ChevronLeft, Plus, EyeOff 
 
 // === Конфигурация ===
 const SHEET_ID = "1IouEV_O2wnycNDzl3Xlu56cCbQT40kaPwyJSxAbipiU"; // Google Sheet
-const APPS_SCRIPT_URL: string | null = "https://script.google.com/macros/s/AKfycbx_vRMftnV2wNNO1A_oy3w6LkVVWbWF2r1Q6ORGXNJKihNOBKHmKydjZI4DgnQ2sghH/exec"; // WebApp для записи
+const APPS_SCRIPT_URL: string | null = "https://script.google.com/macros/library/d/1A6LAp-4_zpnmBRv3RsAZ8yRY5imq7TO7XwSLm76fiR5Yy7Oy1QeOxRUe/6"; // WebApp для записи
 const TABS_INDEX_SHEET = "__tabs"; // индекс вкладок (колонки: sheet, label[, id])
 
 // === Типы ===
@@ -70,24 +70,10 @@ function extractDriveId(u: string): string | null {
   } catch { /* no‑op */ }
   return null;
 }
-
-// Нормализуем ссылки: прямые URL оставляем как есть,
-// Google Drive вида /file/d/.. или ?id=.. превращаем в прямой CDN превью.
 function normalizeImageUrl(u: string): string {
-  try {
-    const url = new URL(u);
-    if (url.hostname.includes("drive.google.com")) {
-      // извлечь id из /file/d/<id>/... или из ?id=<id>
-      const byPath = url.pathname.split("/d/")[1]?.split("/")[0];
-      const byQuery = url.searchParams.get("id");
-      const id = byPath || byQuery || "";
-      // максимально «крупный» превью CDN Google
-      return id ? `https://lh3.googleusercontent.com/d/${id}=s2048` : u;
-    }
-    return u;
-  } catch {
-    return u;
-  }
+  if (!u) return u;
+  const id = extractDriveId(u);
+  return id ? `https://drive.google.com/uc?export=view&id=${id}` : u;
 }
 
 function rowsToMatrix(rows: SheetRow[]): MatrixData {
@@ -194,7 +180,92 @@ function CourseHeaderCell({ cLabel, onHide }: { cLabel: string; onHide: () => vo
   );
 }
 
-export default function CompetitorMatrix() {
+// --- helper: нормализация ссылок на изображения (Drive и прямые URL)
+function normalizeImageUrl(u) {
+  try {
+    const url = new URL(u);
+    if (/\.(png|jpe?g|webp|gif|svg)(\?.*)?$/i.test(url.pathname)) return u;
+    const m1 = url.pathname.match(/\/file\/d\/([^/]+)/);
+    const m2 = url.search.match(/(?:\?|&)id=([^&]+)/);
+    const id = (m1 && m1[1]) || (m2 && m2[1]);
+    if (id) return `https://drive.google.com/thumbnail?id=${id}&sz=w2000`;
+    return u;
+  } catch { return u; }
+}
+
+$1
+  // ▼ Состояние модалки добавления критерия и поля формы
+  const [addCritOpen, setAddCritOpen] = useState(false);
+  const [newCritName, setNewCritName] = useState("");
+  const [newCritDesc, setNewCritDesc] = useState("");
+  const [newCritFilledBy, setNewCritFilledBy] = useState("");
+
+  // ▼ Apps Script: запись метаданных критерия и прайм пустых ячеек
+  const SCRIPT_URL_META = "https://script.google.com/macros/s/AKfycbwg60h1WC_LG9mQkAfXM1V2qgcMd4WT6vzBRIK7ZxGUw7FMvMzO6O13eMH3NlDPDooc/exec";
+  async function postToGASMeta(payload: any) {
+    const res = await fetch(SCRIPT_URL_META, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify(payload),
+      mode: "cors",
+      redirect: "follow",
+      cache: "no-cache",
+    });
+    try { return await res.json(); } catch { return { ok: false, error: "NO_JSON" }; }
+  }
+
+  async function saveNewCriterion() {
+    const id = (globalThis as any).crypto?.randomUUID ? (globalThis as any).crypto.randomUUID() : ("crit_" + Date.now());
+
+    // 1) локально добавляем критерий в «XI. Прочие критерии»
+    setData((prev) => {
+      const updated: MatrixData = {
+        ...prev,
+        criteria: [
+          ...prev.criteria,
+          { id, name: newCritName.trim() || "Без названия", group: "XI. Прочие критерии", description: newCritDesc.trim(), filledBy: newCritFilledBy.trim() },
+        ],
+      };
+      localStorage.setItem("matrixData", JSON.stringify(updated));
+      return updated;
+    });
+
+    // 2) в таблицу: метаданные критерия + пустые ячейки под все курсы
+    const tabName = "Академический отдел"; // при необходимости замените на активную вкладку
+    try {
+      await postToGASMeta({ action: "upsertCriterion", tab: tabName, criterionId: id, section: "Прочие критерии", criterion: newCritName, description: newCritDesc, filled_by: newCritFilledBy });
+      await Promise.all((data.courses || []).map((c) => postToGASMeta({ action: "upsertCell", tab: tabName, courseId: c.id, criterionId: id, text: "", images: [] })));
+    } catch (e) { console.warn("upsertCriterion failed", e); }
+
+    setAddCritOpen(false); setNewCritName(""); setNewCritDesc(""); setNewCritFilledBy("");
+  }
+  // --- __cm_meta_sync: авто‑запись метаданных нового критерия в Google Sheets
+  const __cmSynced = React.useRef<Set<string>>(new Set());
+  React.useEffect(() => {
+    try {
+      const crits: any[] = (data as any)?.criteria || [];
+      const g: any = (globalThis as any);
+      for (const c of crits) {
+        if (!c || !c.id || __cmSynced.current.has(c.id)) continue;
+        __cmSynced.current.add(c.id);
+        const tab = g.__cm_lastTab || (g.__cm_activeTabName || "Академический отдел");
+        if (g.__cm_post) {
+          g.__cm_post({
+            action: "upsertCriterion",
+            tab,
+            criterionId: c.id,
+            section: c.group || "Прочие критерии",
+            criterion: c.name || "",
+            description: c.description || "",
+            filled_by: c.filledBy || "",
+          }).catch((e: any) => console.warn("upsertCriterionMeta failed", e));
+        }
+      }
+    } catch (e) {
+      console.warn(e);
+    }
+  }, [ (data as any)?.criteria ]);
+
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [tabToSheet, setTabToSheet] = useState<Record<string, string>>({});
   const [activeTab, setActiveTab] = useState<string>("");
@@ -298,7 +369,7 @@ export default function CompetitorMatrix() {
         const key = typeof window !== "undefined" ? window.prompt("Введите API_KEY для записи в таблицу", "") : null;
         if (key) {
           setApiKey(key);
-          await fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ ...payload, apiKey: key }) });
+          await fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "atext/plain" }, body: JSON.stringify({ ...payload, apiKey: key }) });
         }
       }
     } catch (e) {
@@ -482,6 +553,27 @@ export default function CompetitorMatrix() {
         </div>
       )}
 
+      {/* Добавить критерий */}
+      <Dialog open={addCritOpen} onOpenChange={setAddCritOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Добавить новый критерий</DialogTitle>
+          </DialogHeader>
+          <div className="flex flex-col gap-3">
+            <Label>Название</Label>
+            <input value={newCritName} onChange={(e) => setNewCritName(e.target.value)} className="border rounded-md p-2 text-sm" />
+            <Label>Описание</Label>
+            <textarea value={newCritDesc} onChange={(e) => setNewCritDesc(e.target.value)} className="border rounded-md p-2 text-sm min-h-[90px]" />
+            <Label>Кто заполняет</Label>
+            <input value={newCritFilledBy} onChange={(e) => setNewCritFilledBy(e.target.value)} className="border rounded-md p-2 text-sm" />
+          </div>
+          <DialogFooter className="pt-2">
+            <Button onClick={saveNewCriterion}>Сохранить</Button>
+            <Button variant="outline" onClick={() => setAddCritOpen(false)}>Отмена</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Просмотр */}
       <Dialog open={!!open} onOpenChange={() => setOpen(null)}>
         <DialogContent className="sm:max-w-5xl w-[min(96vw,1200px)] max-h-[85vh] overflow-auto p-4">
@@ -596,3 +688,148 @@ export default function CompetitorMatrix() {
     </div>
   );
 }
+
+/*
+====================================================================
+PATCH: запись метаданных нового критерия в Google Sheets (section/criterion/description/filled_by)
+====================================================================
+Скопируйте из этого блока нужные функции и ВСТАВЬТЕ вызов в обработчик
+кнопки «Сохранить» модалки «Добавить критерий», сразу после генерации
+newCriterionId и чтения полей формы.
+
+1) Универсальный helper постинга в Apps Script (если у вас ещё нет):
+
+// ---- НАХОДИТСЯ В ВАШЕМ ФАЙЛЕ РЯДОМ С ДРУГИМИ ХЕЛПЕРАМИ ----
+const SCRIPT_URL = "<ВСТАВЬТЕ_ВАШ_EXEC_URL>"; // пример: https://script.google.com/macros/s/XXXX/exec
+
+async function postToGAS(payload) {
+  const res = await fetch(SCRIPT_URL, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify(payload),
+    mode: "cors",
+    redirect: "follow",
+    cache: "no-cache",
+  });
+  if (!res.ok) throw new Error("GAS HTTP " + res.status);
+  return res.json();
+}
+
+2) Функция для записи МЕТАДАННЫХ критерия (новое действие upsertCriterion):
+
+// ---- ВСТАВИТЬ В ФАЙЛ (можно рядом с postToGAS) ----
+async function upsertCriterionMeta({
+  tab,
+  criterionId,
+  name,
+  description,
+  filledBy,
+  section = "Прочие критерии",
+}) {
+  return postToGAS({
+    action: "upsertCriterion",
+    tab,
+    criterionId,
+    section,
+    criterion: name,
+    description,
+    filled_by: filledBy,
+  });
+}
+
+3) ВЫЗОВ в обработчике «Сохранить» при создании критерия:
+
+// ---- НАЙДИТЕ обработчик добавления критерия и ДОБАВЬТЕ: ----
+// Пример имён переменных: activeTabName, newCriterionId, newCriterionName,
+// newCriterionDescription, newCriterionFilledBy
+
+await upsertCriterionMeta({
+  tab: activeTabName,
+  criterionId: newCriterionId,
+  name: newCriterionName,
+  description: newCriterionDescription,
+  filledBy: newCriterionFilledBy,
+  section: "Прочие критерии",
+});
+
+// После записи в таблицу обновите локальные данные вкладки:
+// await reloadCellsForActiveTab?.();
+//   или ваш метод перезагрузки данных (fetch + setState)
+
+4) (Не обязательно) «Пропраймить» пустые ячейки по всем курсам, если матрица
+   рендерится «от cells» (а не от criteria). Тогда новая строка сразу появится:
+
+async function primeNewCriterionAcrossCourses(tab, criterionId, courses) {
+  try {
+    await Promise.all(
+      (courses || []).map((c) => postToGAS({
+        action: "upsertCell",
+        tab,
+        courseId: c.id,
+        criterionId,
+        text: "",
+        images: [],
+      }))
+    );
+  } catch (e) {
+    console.warn("primeNewCriterionAcrossCourses failed", e);
+  }
+}
+// Пример вызова сразу после upsertCriterionMeta:
+// await primeNewCriterionAcrossCourses(activeTabName, newCriterionId, courses);
+
+ПРИМЕЧАНИЕ:
+- Скрипт на стороне Apps Script уже поддерживает action = "upsertCriterion".
+- Если в прототипе матрица строится по списку критериев (criteria), «прайм» не обязателен.
+- Если матрица строится от наличия ячеек (cells), используйте «прайм», чтобы строка отрисовалась сразу.
+====================================================================
+*/
+
+// === __cm_bootstrap: перехват fetch для запоминания таба и URL скрипта, + post helper ===
+(() => {
+  try {
+    const g: any = (globalThis as any);
+    if (g.__cm_bootstrap) return; // защита от повторной инициализации
+    g.__cm_bootstrap = true;
+
+    const origFetch = (g.fetch?.bind(globalThis)) || fetch;
+    g.__cm_scriptUrl = g.__cm_scriptUrl || null;    // базовый /exec URL
+    g.__cm_lastTab = g.__cm_lastTab || null;        // последний tab из загрузки cells
+
+    g.fetch = function(input: any, init?: any) {
+      try {
+        const urlStr = typeof input === 'string' ? input : input?.url;
+        if (urlStr && urlStr.includes('/macros/') && urlStr.includes('/exec')) {
+          const base = (typeof location !== 'undefined') ? location.origin : 'https://dummy.invalid';
+          const u = new URL(urlStr, base);
+          g.__cm_scriptUrl = u.origin + u.pathname; // запомнили базовый URL скрипта
+          const method = String(init?.method || 'GET').toUpperCase();
+          if (method === 'GET') {
+            const action = u.searchParams.get('action');
+            const tab = u.searchParams.get('tab');
+            if (action === 'cells' && tab) g.__cm_lastTab = tab; // запомнили активную вкладку
+          }
+        }
+      } catch {}
+      return origFetch(input as any, init as any);
+    };
+
+    // helper для POST в Apps Script; берёт URL из перехваченного запроса или из глобальной константы, если она есть
+    g.__cm_post = async function(payload: any) {
+      const url = g.__cm_scriptUrl || (g.SCRIPT_URL || g.APPS_SCRIPT_URL || g.GAS_URL);
+      if (!url) throw new Error('Apps Script URL is unknown');
+      const res = await origFetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        body: JSON.stringify(payload),
+        mode: 'cors',
+        redirect: 'follow',
+        cache: 'no-cache',
+      });
+      if (!res.ok) throw new Error('GAS HTTP ' + res.status);
+      return res.json();
+    };
+  } catch (e) {
+    console.warn('__cm_bootstrap failed', e);
+  }
+})();
