@@ -201,7 +201,7 @@ $1
   const [newCritFilledBy, setNewCritFilledBy] = useState("");
 
   // ▼ Apps Script: запись метаданных критерия и прайм пустых ячеек
-  const SCRIPT_URL_META = "https://script.google.com/macros/s/AKfycbwg60h1WC_LG9mQkAfXM1V2qgcMd4WT6vzBRIK7ZxGUw7FMvMzO6O13eMH3NlDPDooc/exec";
+  const SCRIPT_URL_META = "https://script.google.com/macros/library/d/1A6LAp-4_zpnmBRv3RsAZ8yRY5imq7TO7XwSLm76fiR5Yy7Oy1QeOxRUe/6";
   async function postToGASMeta(payload: any) {
     const res = await fetch(SCRIPT_URL_META, {
       method: "POST",
@@ -369,7 +369,7 @@ $1
         const key = typeof window !== "undefined" ? window.prompt("Введите API_KEY для записи в таблицу", "") : null;
         if (key) {
           setApiKey(key);
-          await fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "atext/plain" }, body: JSON.stringify({ ...payload, apiKey: key }) });
+          await fetch(APPS_SCRIPT_URL, { method: "POST", headers: { "Content-Type": "text/plain" }, body: JSON.stringify({ ...payload, apiKey: key }) });
         }
       }
     } catch (e) {
@@ -687,9 +687,8 @@ $1
       </Dialog>
     </div>
   );
-}
 
-/*
+  /*
 ====================================================================
 PATCH: запись метаданных нового критерия в Google Sheets (section/criterion/description/filled_by)
 ====================================================================
