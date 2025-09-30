@@ -69,11 +69,18 @@ function extractDriveId(u: string): string | null {
     const m2 = u.match(/[?&]id=([^&]+)/);      if (m2) return m2[1];
   } catch { /* no‑op */ }
   return null;
-}
-function normalizeImageUrl(u: string): string {
-  if (!u) return u;
-  const id = extractDriveId(u);
-  return id ? `https://drive.google.com/uc?export=view&id=${id}` : u;
+  
+// --- helper: нормализация ссылок на изображения (Drive и прямые URL)
+function normalizeImageUrl(u) {
+  try {
+    const url = new URL(u);
+    if (/\.(png|jpe?g|webp|gif|svg)(\?.*)?$/i.test(url.pathname)) return u;
+    const m1 = url.pathname.match(/\/file\/d\/([^/]+)/);
+    const m2 = url.search.match(/(?:\?|&)id=([^&]+)/);
+    const id = (m1 && m1[1]) || (m2 && m2[1]);
+    if (id) return `https://drive.google.com/thumbnail?id=${id}&sz=w2000`;
+    return u;
+  } catch { return u; }
 }
 
 function rowsToMatrix(rows: SheetRow[]): MatrixData {
@@ -180,20 +187,6 @@ function CourseHeaderCell({ cLabel, onHide }: { cLabel: string; onHide: () => vo
   );
 }
 
-// --- helper: нормализация ссылок на изображения (Drive и прямые URL)
-function normalizeImageUrl(u) {
-  try {
-    const url = new URL(u);
-    if (/\.(png|jpe?g|webp|gif|svg)(\?.*)?$/i.test(url.pathname)) return u;
-    const m1 = url.pathname.match(/\/file\/d\/([^/]+)/);
-    const m2 = url.search.match(/(?:\?|&)id=([^&]+)/);
-    const id = (m1 && m1[1]) || (m2 && m2[1]);
-    if (id) return `https://drive.google.com/thumbnail?id=${id}&sz=w2000`;
-    return u;
-  } catch { return u; }
-}
-
-$1
   // ▼ Состояние модалки добавления критерия и поля формы
   const [addCritOpen, setAddCritOpen] = useState(false);
   const [newCritName, setNewCritName] = useState("");
@@ -525,7 +518,11 @@ async function addCriterionLocal() {
             <div className="font-medium border-b px-2 py-2">Критерии / Курсы</div>
             {visibleCourses.map((c, idx) => (
               <CourseHeaderCell key={c.id} cLabel={`Курс ${idx + 1}`} onHide={() => {
-                setHiddenCourses((prev) => { const next = [...prev, c.id]; localStorage.setItem(storageKey("hiddenCourseIds"), JSON.stringify(next)); return next; });
+                setHiddenCourses((prev) => {
+  const next = [...prev, c.id];
+  localStorage.setItem("hiddenCourseIds", JSON.stringify(next));
+  return next;
+});
               }} />
             ))}
 
