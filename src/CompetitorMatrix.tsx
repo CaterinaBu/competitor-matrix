@@ -29,9 +29,38 @@ import {
  */
 
 /** ===== Конфигурация ===== */
+function getSheetId(): string {
+  // 1) URL-параметр: ?sheetId=... или ?sheet=...
+  try {
+    if (typeof window !== "undefined") {
+      const u = new URL(window.location.href);
+      const p = u.searchParams.get("sheetId") || u.searchParams.get("sheet");
+      if (p && p.trim()) return p.trim();
+    }
+  } catch {}
+
+  // 2) localStorage
+  try {
+    if (typeof window !== "undefined") {
+      const ls = localStorage.getItem("sheet_id");
+      if (ls && ls.trim()) return ls.trim();
+    }
+  } catch {}
+
+  // 3) ENV (Vite)
+  // @ts-expect-error import.meta.env может не быть типизирован
+  const envId = (import.meta?.env?.VITE_SHEET_ID as string) || "";
+  if (envId && envId.trim()) return envId.trim();
+
+  // 4) Фолбек — пусто, чтобы явно попросить указать
+  return "";
+}
+const SHEET_ID = getSheetId();
+
 const APPS_SCRIPT_URL =
   "https://script.google.com/macros/library/d/1A6LAp-4_zpnmBRv3RsAZ8yRY5imq7TO7XwSLm76fiR5Yy7Oy1QeOxRUe/6";
-const SHEET_ID = "1IouEV_O2wnycNDzl3Xlu56cCbQT40kaPwyJSxAbipiU"; // твоя таблица
+
+const TABS_INDEX_SHEET = "__tabs"; // лист с колонками: sheet, label
 
 /** ===== Константы матрицы ===== */
 const COURSE_CRIT_ID = "course_meta";
@@ -83,7 +112,7 @@ async function fetchGViz(sheet: string): Promise<SheetRow[]> {
   if (!res.ok) throw new Error(`Failed to fetch sheet ${sheet}: ${res.status}`);
   const text = await res.text();
 
-  // GViz JSON is wrapped in a js function call — вынимаем JSON
+  // GViz JSON завернут в вызов функции — достаём JSON
   const m = text.match(/google\.visualization\.Query\.setResponse\(([\s\S]+)\)/);
   if (!m) return [];
   const parsed = JSON.parse(m[1]);
@@ -342,17 +371,38 @@ export default function CompetitorMatrix() {
   useEffect(() => {
     (async () => {
       try {
-        const rows = await fetchGViz("__tabs");
+        if (!SHEET_ID) {
+          throw new Error(
+            "Не указан SHEET_ID. Передайте ?sheetId=<ID_таблицы> в URL, сохраните его в localStorage.sheet_id или задайте VITE_SHEET_ID."
+          );
+        }
+        const rows = await fetchGViz(TABS_INDEX_SHEET);
+        if (!rows.length) {
+          throw new Error("Нет вкладок (__tabs) — проверь лист и его доступность");
+        }
+
         const t: Tab[] = [];
         const map: Record<string, string> = {};
+
         rows.forEach((r, idx) => {
-          const sheet = (r.sheet || "").trim();
-          const label = (r.label || "").trim() || sheet || `Tab ${idx + 1}`;
+          // допускаем разные заголовки колонок
+          const keys = Object.fromEntries(
+            Object.keys(r).map((k) => [k.toLowerCase().trim(), k])
+          );
+          const sheetKey =
+            keys.sheet ?? keys["лист"] ?? keys["tab"] ?? keys["sheet_name"] ?? "sheet";
+          const labelKey =
+            keys.label ?? keys["вкладка"] ?? keys["название"] ?? "label";
+
+          const sheet = String(r[sheetKey] || "").trim();
+          const label = String(r[labelKey] || "").trim() || sheet || `Tab ${idx + 1}`;
           if (!sheet) return;
+
           const id = label;
           t.push({ id, label });
           map[id] = sheet;
         });
+
         setTabs(t);
         setTabToSheet(map);
         if (!t.length) throw new Error("Нет вкладок (__tabs)");
@@ -528,7 +578,7 @@ export default function CompetitorMatrix() {
     };
     setData((prev) => ({ ...prev, criteria: [...prev.criteria, newC] }));
 
-    // сбросим форму
+    // сброс формы
     setNewCriterion({ name: "", description: "", filledBy: "" });
     setAddCriterionOpen(false);
 
@@ -598,7 +648,8 @@ export default function CompetitorMatrix() {
         {tabs.length === 0 ? (
           <span className="text-xs text-muted-foreground">
             Нет вкладок. Создайте лист <code>__tabs</code> с колонками{" "}
-            <code>sheet</code>, <code>label</code>.
+            <code>sheet</code>, <code>label</code>. Убедитесь, что указан правильный{" "}
+            <code>sheetId</code>.
           </span>
         ) : (
           tabs.map((t) => (
@@ -624,7 +675,6 @@ export default function CompetitorMatrix() {
           </span>
         </h1>
         <div className="flex gap-2 items-center">
-          {/* «Свернуть/развернуть все» для групп */}
           <Button
             variant="outline"
             size="sm"
@@ -641,7 +691,6 @@ export default function CompetitorMatrix() {
             Сменить разворот групп
           </Button>
 
-          {/* Добавить критерий — в «Прочие критерии» */}
           <Button
             variant="default"
             size="sm"
