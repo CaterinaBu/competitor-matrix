@@ -579,16 +579,7 @@ export default function CompetitorMatrix() {
           <DialogHeader>
             <DialogTitle>Пока добавить новый критерий можно только вручную. Для этого напишите Катерине Бу.</DialogTitle>
           </DialogHeader>
-          //<div className="flex flex-col gap-3">
-            //<Label>Название критерия</Label>
-            //<input value={newCriterion.name} onChange={(e) => setNewCriterion({ ...newCriterion, name: e.target.value })} className="border rounded-md p-2 text-sm" />
-            //<Label>Описание</Label>
-            //<input value={newCriterion.description} onChange={(e) => setNewCriterion({ ...newCriterion, description: e.target.value })} className="border rounded-md p-2 text-sm" />
-            //<Label>Кто заполняет</Label>
-            //<input value={newCriterion.filledBy} onChange={(e) => setNewCriterion({ ...newCriterion, filledBy: e.target.value })} className="border rounded-md p-2 text-sm" />
-          //</div>
           <DialogFooter className="pt-2">
-            //<Button onClick={addCriterionLocal}>Добавить</Button>
             <Button variant="outline" onClick={() => setAddCriterionOpen(false)}>Отмена</Button>
           </DialogFooter>
         </DialogContent>
