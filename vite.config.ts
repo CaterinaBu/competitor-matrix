@@ -1,8 +1,13 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import path from 'node:path'
 
-// ЗАМЕНИ "competitor-matrix" на точное имя твоего репо
 export default defineConfig({
   plugins: [react()],
-  base: '/competitor-matrix/',
+  base: '/competitor-matrix/',   // для GitHub Pages
+  resolve: {
+    alias: {
+      '@': path.resolve(__dirname, './src'), // ← алиас @ -> src
+    },
+  },
 })
