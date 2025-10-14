@@ -14,7 +14,7 @@ import { Maximize2, Edit3, ChevronDown, ChevronRight, ChevronLeft, Plus, EyeOff 
 
 // === Конфигурация ===
 const SHEET_ID = "1IouEV_O2wnycNDzl3Xlu56cCbQT40kaPwyJSxAbipiU"; // Google Sheet
-const APPS_SCRIPT_URL: string | null = "https://script.google.com/macros/s/AKfycbx_vRMftnV2wNNO1A_oy3w6LkVVWbWF2r1Q6ORGXNJKihNOBKHmKydjZI4DgnQ2sghH/exec"; // WebApp для записи
+const APPS_SCRIPT_URL: string | null = (import.meta as any).env?.VITE_GAS_URL ?? null; // WebApp для записи (из .env)
 const TABS_INDEX_SHEET = "__tabs"; // индекс вкладок (колонки: sheet, label[, id])
 
 // === Типы ===
