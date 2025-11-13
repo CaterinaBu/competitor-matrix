@@ -6,11 +6,48 @@ function must(url?: string) {
   return url;
 }
 
+// типы данных, которые отдаёт Apps Script для action=cells
+export type Criterion = {
+  id: string;
+  name: string;
+  group?: string;
+  description?: string;
+  filledBy?: string;
+};
+
+export type Course = {
+  id: string;
+  name: string;
+};
+
+export type Cell = {
+  courseId: string;
+  criterionId: string;
+  text?: string;
+  images?: string[];
+};
+
+export type MatrixData = {
+  criteria: Criterion[];
+  courses: Course[];
+  cells: Cell[];
+};
+
+type CellsResponse = {
+  ok: boolean;
+  data: MatrixData;
+  error?: string;
+};
+
 // чтение ячеек
-export async function getCells(tab: string) {
+export async function getCells(tab: string): Promise<MatrixData> {
   const r = await fetch(`${must(API)}?action=cells&tab=${encodeURIComponent(tab)}`);
   if (!r.ok) throw new Error(`GET ${r.status}`);
-  return r.json();
+
+  const json: CellsResponse = await r.json();
+  if (!json.ok) throw new Error(json.error || "cells error");
+
+  return json.data;
 }
 
 // сохранение ячейки (text/images/courseId — опционально)
