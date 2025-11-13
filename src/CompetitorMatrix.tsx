@@ -4,6 +4,8 @@ import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Card, CardContent } from "@/components/ui/card";
 import { Maximize2, Edit3, ChevronDown, ChevronRight, ChevronLeft, Plus, EyeOff } from "lucide-react";
+import { getCells } from "@/api";
+
 
 // =================================================
 // Sheets‑driven прототип (упрощённая версия)
@@ -234,29 +236,58 @@ export default function CompetitorMatrix() {
     return () => { cancelled = true; };
   }, []);
 
-  // === Загрузка данных активной вкладки ===
-  useEffect(() => {
-    if (!activeTab) return;
-    let cancelled = false;
-    (async () => {
-      setLoading(true); setLoadError(null);
-      try {
-        const sheetName = tabToSheet[activeTab];
-        if (!sheetName) throw new Error(`Для вкладки ${activeTab} не найден лист в __tabs`);
-        const rows = await fetchGViz(sheetName);
-        if (cancelled) return;
-        setData(rowsToMatrix(rows));
-        const savedHidden = localStorage.getItem(storageKey("hiddenCourseIds"));
-        setHiddenCourses(savedHidden ? JSON.parse(savedHidden) : []);
-        setCollapsedGroups({}); setOpen(null); setEdit(null);
-      } catch (e: any) {
-        if (!cancelled) setLoadError(e?.message || String(e));
-      } finally {
-        if (!cancelled) setLoading(false);
+useEffect(() => {
+  if (!activeTab) return;
+  let cancelled = false;
+
+  (async () => {
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const sheetName = tabToSheet[activeTab];
+      if (!sheetName) {
+        throw new Error(`Для вкладки ${activeTab} не найден лист в __tabs`);
       }
-    })();
-    return () => { cancelled = true; };
-  }, [activeTab, tabToSheet]);
+
+      // Тянем данные напрямую из Apps Script, минуя gviz-кэш
+      const matrix = await getCells(sheetName);
+      if (cancelled) return;
+
+      // Приводим картинки к текущему формату Cell.images: { url, caption? }[]
+      const cells: Cell[] = matrix.cells.map((cell) => ({
+        ...cell,
+        images: (cell.images || []).map((url) => ({
+          url: normalizeImageUrl(url),
+        })),
+      }));
+
+      setData({
+        criteria: matrix.criteria,
+        courses: matrix.courses,
+        cells,
+      });
+
+      const savedHidden = localStorage.getItem(storageKey("hiddenCourseIds"));
+      setHiddenCourses(savedHidden ? JSON.parse(savedHidden) : []);
+      setCollapsedGroups({});
+      setOpen(null);
+      setEdit(null);
+    } catch (e: any) {
+      if (!cancelled) {
+        setLoadError(e?.message || String(e));
+      }
+    } finally {
+      if (!cancelled) {
+        setLoading(false);
+      }
+    }
+  })();
+
+  return () => {
+    cancelled = true;
+  };
+}, [activeTab, tabToSheet]);
+
 
   // Сброс индекса просмотрщика при смене ячейки
   useEffect(() => { setViewerIndex(0); }, [open?.courseId, open?.criterionId]);
