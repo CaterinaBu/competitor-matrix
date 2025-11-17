@@ -15,7 +15,7 @@ import { getCells } from "@/api";
 // =================================================
 
 // === Конфигурация ===
-const SHEET_ID = "1IouEV_O2wnycNDzl3Xlu56cCbQT40kaPwyJSxAbipiU"; // Google Sheet
+const SHEET_ID = "1F005rrzv-PK78XgrYxI6UvoDm3n72LCU6CTrKf-zx-I"; // Google Sheet
 const APPS_SCRIPT_URL: string | null = (import.meta as any).env?.VITE_GAS_URL ?? null; // WebApp для записи (из .env)
 const TABS_INDEX_SHEET = "__tabs"; // индекс вкладок (колонки: sheet, label[, id])
 
